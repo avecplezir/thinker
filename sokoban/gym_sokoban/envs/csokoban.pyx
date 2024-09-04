@@ -22,14 +22,16 @@ cdef class cSokoban:
 	def reset(self):
 		cdef np.ndarray obs = np.zeros((self.obs_n), dtype=np.dtype("u1"))
 		cdef unsigned char[::1] obs_view = obs
-		self.c_sokoban.reset(&obs_view[0])
-		return obs.reshape(self.obs_x,self.obs_y,3)
+		cdef bool cost = False
+		self.c_sokoban.reset(&obs_view[0], cost)
+		return obs.reshape(self.obs_x,self.obs_y,3), {"step_n": self.step_n, "cost": cost}
 
 	def reset_level(self, int room_id):
 		cdef np.ndarray obs = np.zeros((self.obs_n), dtype=np.dtype("u1"))
 		cdef unsigned char[::1] obs_view = obs
-		self.c_sokoban.reset_level(&obs_view[0], room_id)
-		return obs.reshape(self.obs_x,self.obs_y,3)		
+		cdef bool cost = False
+		self.c_sokoban.reset_level(&obs_view[0], room_id, cost)
+		return obs.reshape(self.obs_x,self.obs_y,3), {"step_n": self.step_n, "cost": cost}
 
 	def step(self, int act):
 		assert act >= 0 and act <= 4, "action should be in [0, 1, 2, 3, 4]"
@@ -43,7 +45,7 @@ cdef class cSokoban:
 		cdef bool truncated_done = False
 		cdef bool cost = False
 		self.c_sokoban.step(act, &obs_view[0], reward, done, truncated_done, cost)
-		return obs.reshape(self.obs_x,self.obs_y,3), reward, done, {"step_n": self.step_n, "truncated_done": truncated_done, "cost": cost}
+		return obs.reshape(self.obs_x,self.obs_y,3), reward, done, truncated_done, {"step_n": self.step_n, "cost": cost}
 
 	def clone_state(self):
 		cdef np.ndarray room_status = np.zeros((10*10), dtype=np.dtype("u1"))

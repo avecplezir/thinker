@@ -58,7 +58,7 @@ def plot_policies(logits, labels, action_meanings, ax=None, title="Real policy p
         fig, ax = plt.subplots()
     probs = []
     for logit, k in zip(logits, labels):
-        if k != "action":
+        if k not in ["model policy", "action"]:
             probs.append(torch.softmax(logit, dim=-1).detach().cpu().numpy())
         else:
             probs.append(logit.detach().cpu().numpy())
@@ -74,11 +74,10 @@ def plot_policies(logits, labels, action_meanings, ax=None, title="Real policy p
     ax.legend()
 
 
-def plot_base_policies(logits, action_meanings, ax=None):
+def plot_base_policies(prob, action_meanings, ax=None):
     if ax is None:
         fig, ax = plt.subplots()
-    prob = torch.softmax(logits, dim=-1).detach().cpu().numpy()
-    rec_t, num_actions = logits.shape
+    rec_t, num_actions = prob.shape
     xs = np.arange(rec_t)
     labels = action_meanings
     for i in range(num_actions):
@@ -382,7 +381,6 @@ def visualize(
         action_meanings = [str(n) for n in range(env.num_actions)]
     num_actions = env.num_actions
 
-    env.seed([seed])
     print("Sampled seed: %d" % seed)    
 
     obs_space = env.observation_space
@@ -416,9 +414,8 @@ def visualize(
     outdir = outdir_
 
     # initalize env
-    state = env.reset()
-    root_env_state = env.clone_state([0])
-    env_out = init_env_out(state, flags, actor_net.dim_actions, actor_net.tuple_action)
+    state, info = env.reset()
+    env_out = init_env_out(state, info, flags, actor_net.dim_actions, actor_net.tuple_action)
     
     # some initial setting
     plt.rcParams.update({"font.size": 15})
@@ -429,7 +426,7 @@ def visualize(
 
     step = 0
     real_step = 0
-    returns, model_logits = (
+    returns, model_policy = (
         [],
         [],
     )
@@ -473,16 +470,14 @@ def visualize(
         im_dict["cur_reset"].append(actor_out.reset[:,0])
         
         tree_reps_ = env.decode_tree_reps(env_out.tree_reps)
-        model_logits.append(tree_reps_["cur_policy"])       
+        model_policy.append(tree_reps_["cur_policy"])       
 
-        state, reward, done, info = env.step(action[0], action[1])
+        state, reward, done, truncated_done, info = env.step(action[0], action[1])
         last_real_step = (info["step_status"] == 0) | (info["step_status"] == 3)
         next_real_step = (info["step_status"] == 2) | (info["step_status"] == 3)
 
         if render:
-            if last_real_step:
-                root_env_state = env.clone_state([0])
-            else:
+            if not last_real_step:
                 if flags.sample_n > 0:
                     cur_raw_action = (tree_reps_["cur_raw_action"].view(flags.sample_n, env.raw_dim_actions)*env.raw_num_actions)[action[0][0]]
                     cur_raw_action = cur_raw_action.long().unsqueeze(0)
@@ -490,7 +485,7 @@ def visualize(
                     cur_raw_action = action[0]
                 if not im_done: _, _, im_done, _ = env.unwrapped_step(cur_raw_action.numpy())
 
-        env_out = create_env_out(action, state, reward, done, info, flags)
+        env_out = create_env_out(action, state, reward, done, truncated_done, info, flags)
 
         tree_reps = env.decode_tree_reps(env_out.tree_reps)
         if (
@@ -509,15 +504,14 @@ def visualize(
             xs = env.render(mode='rgb_array', camera_id=0)[0]   
 
         if render and (tree_reps["cur_reset"] == 1 or next_real_step):
-            env.restore_state(root_env_state, [0])   
             im_done = False   
 
        # if ~last_real_step and (
        #     tree_reps["cur_reset"] == 1 or next_real_step
        # ):
-        title = "pred v: %.2f" % (tree_reps["cur_v"].item())
-        title += " pred g: %.2f" % (tree_reps["rollout_return"].item())
-        title += " pred r: %.2f" % (tree_reps["cur_r"].item())
+        title = "pred v: %.2f" % (tree_reps["cur_v"][:, 0].item())
+        title += " pred g: %.2f" % (tree_reps["rollout_return"][:, 0].item())
+        title += " pred r: %.2f" % (tree_reps["cur_r"][:, 0].item())
         if len(end_gym_env_outs) < 10: end_gym_env_outs.append(xs)
         end_titles.append(title)
 
@@ -556,7 +550,7 @@ def visualize(
             plot_gym_env_out(last_root_real_states, axs[0], title="Real State")
             last_root_real_states = root_real_states
             plot_base_policies(
-                torch.concat(model_logits)[:, :num_actions], action_meanings=action_meanings, ax=axs[1]
+                torch.concat(model_policy)[:, :num_actions], action_meanings=action_meanings, ax=axs[1]
             )
             plot_im_policies(
                 **im_dict,
@@ -611,9 +605,9 @@ def visualize(
             )
             print(log_str)
 
-            stat = f"Real Step: {real_step} Root v: {tree_reps_['root_v'][0].item():.2f} Actor v: {agent_v:.2f}"
-            stat += f" Root Max Q: {tree_reps_['max_rollout_return'][0].item():.2f} Init. Root Max Q: {ini_max_q:.2f}"
-            stat += f" Root Mean Q: {info['baseline'][0].item():.2f}"
+            stat = f"Real Step: {real_step} Root v: {tree_reps_['root_v'][0, 0].item():.2f} Actor v: {agent_v:.2f}"
+            stat += f" Root Max Q: {tree_reps_['max_rollout_return'][0, 0].item():.2f} Init. Root Max Q: {ini_max_q:.2f}"
+            stat += f" Root Mean Q: {info['baseline'][0, 0].item():.2f}"
             if 'cur_reward' in info: stat += f" CurReward: {info['cur_reward'][0].item():.6f}"
 
             if flags.im_cost > 0.0:
@@ -633,8 +627,8 @@ def visualize(
                 buf2.close()
 
             im_dict = {k: [] for k in im_list}
-            model_logits, end_gym_env_outs, end_titles = [], [], []
-            ini_max_q = tree_reps["max_rollout_return"][0].item()
+            model_policy, end_gym_env_outs, end_titles = [], [], []
+            ini_max_q = tree_reps["max_rollout_return"][0, 0].item()
 
             real_step += 1
             #if real_step >= 5: break

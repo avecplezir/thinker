@@ -28,8 +28,8 @@ model_img_loss_cost: 0.0 # cost for training model's state output (L2 loss) (dua
 model_fea_loss_cost: 10.0 # cost for training model's state output (feature loss) (dual network only)
 model_reg_loss_cost: 0.0 # cost for model regularization loss
 model_noise_loss_cost: 0.0 # cost for model noise loss
-fea_loss_inf_bn: false # whether to use inference mode for vp-net when computing feature loss
-img_fea_cos: false # whether to use cosine similarity loss for img_loss and fea_loss
+fea_loss_inf_bn: true # whether to use inference mode for vp-net when computing feature loss
+img_fea_cos: true # whether to use cosine similarity loss for img_loss and fea_loss
 # model setting
 dual_net: true # whether to use dual network
 model_decoder_depth: 0 # decoder level; can be from 0 to 4; 0 mean predicing raw image, 4 mean predicting vp_net feature directly
@@ -82,14 +82,12 @@ noise_d: 10 # number of category for each variable
 noise_alpha: 0.8 # alpha for kl divergence rebalancing
 noise_mlp: false # use 2-layer mlp to compress noise
 # general wrapper setting
-atari: false # whether to use atari wrapper
+envpool: false # whether to use env pool (only available for atari)
+# atari-specific setting
 grayscale: false # whether to apply grayscale for atari
-repeat_action_n: 0 # custom frame stacking (only for non-Atari envrionment)
-rand_action_eps: 0. # probability of randomly setting to 0 action
-# Sokoban-related setting
-sokoban_pomdp: false # whether to randomly mixing the location of agent in Sokoban
-# env-specific setting
-dm_rgb: false # whether to use rgb for dm control suite
+frame_stack_n: 4 # number of frame stacking for atari
+# sokoban-specific setting
+detect_dan_num: 0 # number of dangerous location in Sokoban
 # checkpoint
 xpid: '' # name of the run, automatically set if not given
 ckp: false # whether to load checkpoint; if set to true, will load checkpoint from savedir/xpid

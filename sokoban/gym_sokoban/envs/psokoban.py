@@ -1,12 +1,14 @@
-import gym
-from gym.spaces.discrete import Discrete
-from gym.spaces import Box
+import gymnasium as gym
+from gymnasium.spaces.discrete import Discrete
+from gymnasium.spaces import Box
 from .csokoban import cSokoban
 import numpy as np
 import pkg_resources
 import os 
 
 class SokobanEnv(gym.Env):
+    metadata = {"render_modes": ["rgb_array"]}
+
     def __init__(self, difficulty='unfiltered', small=True, dan_num=0, seed=0):
         if difficulty == 'unfiltered': 
             level_num = 900000                      
@@ -37,15 +39,24 @@ class SokobanEnv(gym.Env):
         # self.sokoban.reset()
 
     def step(self, action):
-        obs, reward, done, info = self.sokoban.step(action)
+        obs, reward, done, truncated_done, info = self.sokoban.step(action)
         reward = round(reward, 2)
-        return obs, reward, done, info
+        return obs, reward, done, truncated_done, info
 
-    def reset(self, room_id=None):
-        if room_id is None:
-            return self.sokoban.reset()
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            self.seed(seed)
+        if options is not None and "room_id" in options:
+            return self.sokoban.reset_level(options["room_id"])   
         else:
-            return self.sokoban.reset_level(room_id)   
+            return self.sokoban.reset()
+            
+        
+    def quick_save(self):
+        self.save_state = self.sokoban.clone_state()
+
+    def quick_load(self):
+        self.sokoban.restore_state(self.save_state)
         
     def clone_state(self):
         return self.sokoban.clone_state()

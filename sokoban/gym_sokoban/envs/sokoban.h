@@ -38,8 +38,8 @@ public:
 		read_spirits();
 	};
 	static constexpr int room_x = 10, room_y = 10, small_img_x = 8, small_img_y = 8, large_img_x = 16, large_img_y = 16;
-	void reset(unsigned char* obs);
-	void reset_level(unsigned char* obs, const int room_id);
+	void reset(unsigned char* obs, bool& cost);
+	void reset_level(unsigned char* obs, const int room_id, bool& cost);
 	void step(const action a, unsigned char* obs, float& reward, bool& done, bool& truncated_done, bool& cost);
 	void step(const int a, unsigned char* obs, float& reward, bool& done, bool& truncated_done, bool& cost);
 	int read_level(const int room_id);

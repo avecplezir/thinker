@@ -192,11 +192,13 @@ class SModelBuffer:
             t_idx_ =  (t_idx_ + 1) % self.T
         if self.frame_stack_n > 1:
             frame = np.zeros((t + self.frame_stack_n - 1, b) + self.buffer["real_state"].shape[2:], dtype=self.buffer["real_state"].dtype)
+            stack_done = np.zeros((t + self.frame_stack_n - 1, b), dtype=bool)
             t_idx_ = (t_idx - self.frame_stack_n + 1) % self.T
             for i in range(t + self.frame_stack_n - 1):    
                 frame[i] = self.buffer["real_state"][t_idx_, b_idx]
+                stack_done[i] = self.buffer["done"][t_idx_, b_idx]
                 t_idx_ =  (t_idx_ + 1) % self.T
-            data["real_state"] = stack_frame(frame, self.frame_stack_n, done=data["done"])
+            data["real_state"] = stack_frame(frame, self.frame_stack_n, done=stack_done)
         avg_replay_ratio = np.nanmean(self.read_time)
         
         return {"data": data, 
@@ -239,13 +241,15 @@ class ModelBuffer(SModelBuffer):
     pass
 
 def stack_frame(frame, frame_stack_n, done):
-    T, B, C, H, W = frame.shape[0] - frame_stack_n + 1, frame.shape[1], frame.shape[2], frame.shape[3], frame.shape[4]
-    assert done.shape[0] >= T
-    done = done[:T]
-    y = np.zeros((T, B, C * frame_stack_n, H, W), dtype=frame.dtype)
+    T, B, C = frame.shape[0] - frame_stack_n + 1, frame.shape[1], frame.shape[2]
+    assert done.shape[0] == T + frame_stack_n - 1
+    y = np.zeros((T, B, C * frame_stack_n)+frame.shape[3:], dtype=frame.dtype)
     for s in range(frame_stack_n):
-        y[:, :, s*C:(s+1)*C, :, :] = frame[s:T+s]
-        y[:, :, s*C:(s+1)*C, :, :][done] = frame[frame_stack_n - 1: T + frame_stack_n - 1][done]
+        y[:, :, s*C:(s+1)*C] = frame[s:T+s]
+    s_done = np.zeros(B, dtype=bool)
+    for s in range(frame_stack_n-2, -1, -1):        
+        s_done = done[s+1:T+s+1] | s_done
+        y[:, :, s*C:(s+1)*C][s_done] = y[:, :, (s+1)*C:(s+2)*C][s_done]
     return y
 
 @ray.remote
@@ -365,7 +369,7 @@ class RetBuffer:
         self.max_return = 0.
         self.all_filled = False
 
-    def insert(self, returns, actor_ids):
+    def _insert_tuple(self, returns, actor_ids):
         """
         Insert new returnss to the return buffer
         Args:
@@ -399,7 +403,8 @@ class RetBuffer:
                 self.return_buffer_n >= self.return_buffer.shape[1]
             )
 
-    def insert_raw(self, episode_returns, ind, actor_id, done):                
+    def insert(self, episode_returns, ind, actor_id, done):                
+        if not torch.any(done): return (), ()          
         if torch.is_tensor(episode_returns):
             episode_returns = episode_returns.detach().cpu().numpy()
         if torch.is_tensor(actor_id):
@@ -411,7 +416,8 @@ class RetBuffer:
         episode_returns = tuple(episode_returns)
         done_ids = np.broadcast_to(actor_id, done.shape)[done]
         done_ids = tuple(done_ids)
-        self.insert(episode_returns, done_ids)
+        self._insert_tuple(episode_returns, done_ids)
+        return episode_returns, done_ids
 
     def get_mean(self):
         """
@@ -449,11 +455,12 @@ class SelfPlayBuffer:
             self.flags.self_play_n * self.flags.env_n
         )
 
-        self.ret_buffers = [RetBuffer(max_actor_id, mean_n=400)]
+        self.ret_buffers = {"re": RetBuffer(max_actor_id, mean_n=400)}
         if self.flags.im_cost > 0.:
-            self.ret_buffers.append(RetBuffer(max_actor_id, mean_n=20000))
+            self.ret_buffers["im"] = RetBuffer(max_actor_id, mean_n=20000)
         if self.flags.cur_cost > 0.:
-            self.ret_buffers.append(RetBuffer(max_actor_id, mean_n=400))      
+            self.ret_buffers["cur"] = RetBuffer(max_actor_id, mean_n=400) 
+        self.ret_buffers["len"] = RetBuffer(max_actor_id, mean_n=400)
         
         self.plogger = FileWriter(
             xpid=flags.xpid,
@@ -492,24 +499,26 @@ class SelfPlayBuffer:
         stats = {}
 
         T, B, *_ = episode_return.shape
+
+        step_status = torch.tensor(step_status)
+        episode_return = torch.tensor(episode_return)        
+        episode_step = torch.tensor(episode_step)
+        real_done = torch.tensor(real_done)        
+
         last_step_real = (step_status == 0) | (step_status == 3)
         next_step_real = (step_status == 2) | (step_status == 3)
 
         # extract episode_returns
-        if np.any(real_done):            
-            episode_returns = episode_return[real_done][
-                :, 0
-            ]
-            episode_returns = tuple(episode_returns)
-            episode_lens = episode_step[real_done]
-            episode_lens = tuple(episode_lens)
-            done_ids = np.broadcast_to(actor_id, real_done.shape)[real_done]
-            done_ids = tuple(done_ids)
-        else:
-            episode_returns, episode_lens, done_ids = (), (), ()
+        episode_returns, done_ids = self.ret_buffers["re"].insert(
+            episode_return, ind=0, actor_id=actor_id, done=real_done
+        )
+        episode_lens, _ = self.ret_buffers["len"].insert(
+            episode_step.unsqueeze(-1), ind=0, actor_id=actor_id, done=real_done
+        )
 
-        self.ret_buffers[0].insert(episode_returns, done_ids)
-        stats = {"rmean_episode_return": self.ret_buffers[0].get_mean()}
+        stats = {"rmean_episode_return": self.ret_buffers["re"].get_mean(),
+                 "max_episode_return": self.ret_buffers["re"].get_max(),
+                 "rmean_len": self.ret_buffers["len"].get_mean(),}
 
         for prefix in ["im", "cur"]:            
             if prefix == "im":
@@ -519,18 +528,15 @@ class SelfPlayBuffer:
             
             if prefix in self.rewards_ls:            
                 n = self.rewards_ls.index(prefix)
-                self.ret_buffers[n].insert_raw(
-                    episode_return,
-                    ind=n,
-                    actor_id=actor_id,
-                    done=done,
+                self.ret_buffers[prefix].insert(
+                    episode_return, ind=n, actor_id=actor_id, done=done,
                 )
-                r = self.ret_buffers[n].get_mean()
+                r = self.ret_buffers[prefix].get_mean()
                 stats["rmean_%s_episode_return" % prefix] = r
 
         self.step += T * B
-        self.real_step += np.sum(last_step_real).item()
-        self.tot_eps += np.sum(real_done).item()
+        self.real_step += torch.sum(last_step_real).item()
+        self.tot_eps += torch.sum(real_done).item()
 
         stats.update({
             "step": self.step,

@@ -60,7 +60,7 @@ with open("requirements.txt") as fp:
 
 setup(
     name="gym_sokoban",
-    version="1.0.1",
+    version="1.1.0",
     packages=["gym_sokoban"],
     ext_modules=extensions,
     install_requires=install_requires,

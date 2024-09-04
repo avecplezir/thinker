@@ -109,11 +109,12 @@ class SActorLearner:
         max_actor_id = (
             self.flags.self_play_n * self.flags.env_n
         )
-        self.ret_buffers = [RetBuffer(max_actor_id, mean_n=400)]
+        self.ret_buffers = {"re": RetBuffer(max_actor_id, mean_n=400)}
         if self.flags.im_cost > 0.:
-            self.ret_buffers.append(RetBuffer(max_actor_id, mean_n=20000))
+            self.ret_buffers["im"] = RetBuffer(max_actor_id, mean_n=20000)
         if self.flags.cur_cost > 0.:
-            self.ret_buffers.append(RetBuffer(max_actor_id, mean_n=400))      
+            self.ret_buffers["cur"] = RetBuffer(max_actor_id, mean_n=400)
+        self.ret_buffers["len"] = RetBuffer(max_actor_id, mean_n=400)
         self.im_discounting = self.flags.discounting ** (1 / self.flags.rec_t)
 
         self.rewards_ls = ["re"]
@@ -124,7 +125,7 @@ class SActorLearner:
         self.num_rewards = len(self.rewards_ls)
         
         if self.flags.return_norm_type in [0, 1]:
-            self.norm_stats = [(None, None, None, util.FifoBuffer(100000 * self.flags.ppo_k, device=self.device),)] * self.num_rewards
+            self.norm_stats = [(None, None, None, util.FifoBuffer(100000 * self.flags.ppo_k, device=self.device),) for _ in range(self.num_rewards)] 
         else:
             self.norm_stats = [None,] * self.num_rewards
         self.anneal_c = 1
@@ -145,7 +146,7 @@ class SActorLearner:
         
         # move network and optimizer to process device
         self.actor_net.to(self.device)
-        util.optimizer_to(self.optimizer, self.device)        
+        util.optimizer_to(self.optimizer, self.device)    
 
         # variables for timing
         self.queue_n = 0
@@ -157,6 +158,17 @@ class SActorLearner:
         self.sps_start_time, self.sps_start_step = self.start_time, self.step
         self.ckp_start_time = int(time.strftime("%M")) // 10
         self.disable_thinker = flags.wrapper_type == 1
+        
+         # autotune
+        self.autotune = flags.autotune
+        if self.autotune:
+            assert self.actor_net.discrete_action, "auto support discrete action set at the moment"
+            self.tar_entropy = -flags.tar_entropy_scale * torch.log(1 / torch.tensor(self.actor_net.num_actions * self.actor_net.dim_actions))   
+            self.tar_entropy = self.tar_entropy.item()
+            if not self.disable_thinker:
+                self.tar_im_entropy = -flags.tar_im_entropy_scale * torch.log(1 / torch.tensor(self.actor_net.num_actions * self.actor_net.dim_actions))   
+                self.tar_im_entropy += -flags.tar_im_entropy_scale * torch.log(1 / torch.tensor(2))   # reset action
+                self.tar_im_entropy = self.tar_im_entropy.item()    
     
         if self.flags.float16:
             self.scaler = GradScaler(init_scale=2**8)
@@ -482,7 +494,8 @@ class SActorLearner:
         # compute advantage and baseline        
         pg_losses = []
         baseline_losses = []
-        discounts = [(~train_actor_out.done).float() * self.im_discounting]
+        done = train_actor_out.done | train_actor_out.truncated_done
+        discounts = [(~done).float() * self.im_discounting]
         masks = [None]
 
         last_step_real = (train_actor_out.step_status == 0) | (train_actor_out.step_status == 3)
@@ -492,7 +505,7 @@ class SActorLearner:
             discounts.append((~next_step_real).float() * self.im_discounting)            
             masks.append((~last_step_real).float())
         if self.flags.cur_cost > 0.:
-            discounts.append((~train_actor_out.done).float() * self.im_discounting)            
+            discounts.append((~done).float() * self.im_discounting)            
             masks.append(None)
 
         if not self.ppo_enable or self.flags.ppo_v_trace:
@@ -583,20 +596,36 @@ class SActorLearner:
                 losses["%s_baseline_loss" % prefix] = baseline_losses[n]
 
         # process entropy loss
+        if not self.autotune:
+            entropy_cost = self.flags.entropy_cost
+            im_entropy_cost = self.flags.im_entropy_cost
+        else:            
+            entropy_cost = self.actor_net.log_entropy_cost.exp().item()
+            im_entropy_cost = self.actor_net.log_im_entropy_cost.exp().item()
 
         f_entropy_loss = new_actor_out.entropy_loss
         entropy_loss = f_entropy_loss * last_step_real.float()
+        policy_entropy = -entropy_loss.sum() / last_step_real.sum()
         entropy_loss = torch.sum(entropy_loss)        
         losses["entropy_loss"] = entropy_loss
-        total_loss += self.flags.entropy_cost * entropy_loss / self.actor_net.dim_actions
-
+        total_loss += entropy_cost * entropy_loss / self.actor_net.dim_actions
+        
         if not self.disable_thinker:
             im_entropy_loss = f_entropy_loss * (~last_step_real).float()
+            im_policy_entropy = -im_entropy_loss.sum() / (~last_step_real).sum()
             im_entropy_loss = torch.sum(im_entropy_loss)
-            total_loss += self.flags.im_entropy_cost * im_entropy_loss
-            losses["im_entropy_loss"] = im_entropy_loss / self.actor_net.dim_actions
+            total_loss += im_entropy_cost * im_entropy_loss
+            losses["im_entropy_loss"] = im_entropy_loss / self.actor_net.dim_actions            
 
-        reg_loss = torch.sum(new_actor_out.reg_loss)
+        if self.autotune:
+            autotune_loss = -self.actor_net.log_entropy_cost.exp() * (self.tar_entropy - policy_entropy.detach())            
+            if not self.disable_thinker:
+                autotune_loss += -self.actor_net.log_im_entropy_cost.exp() * (self.tar_im_entropy - im_policy_entropy.detach())
+            autotune_loss = autotune_loss[0]
+            losses["autotune_loss"] = autotune_loss
+            total_loss += autotune_loss
+
+        reg_loss = torch.sum(new_actor_out.reg_loss)        
         losses["reg_loss"] = reg_loss
         total_loss += self.flags.reg_cost * reg_loss
 
@@ -650,21 +679,16 @@ class SActorLearner:
         real_done = train_actor_out.real_done |  train_actor_out.truncated_done     
 
         # extract episode_returns
-        if torch.any(real_done):            
-            episode_returns = train_actor_out.episode_return[real_done][
-                :, 0
-            ]
-            episode_returns = tuple(episode_returns.detach().cpu().numpy())
-            episode_lens = train_actor_out.episode_step[real_done]
-            episode_lens = tuple(episode_lens.detach().cpu().numpy())
-            done_ids = actor_id.broadcast_to(real_done.shape)[real_done]
-            done_ids = tuple(done_ids.detach().cpu().numpy())
-        else:
-            episode_returns, episode_lens, done_ids = (), (), ()
+        episode_returns, done_ids = self.ret_buffers["re"].insert(
+            train_actor_out.episode_return, ind=0, actor_id=actor_id, done=real_done
+        )
+        episode_lens, _ = self.ret_buffers["len"].insert(
+            train_actor_out.episode_step.unsqueeze(-1), ind=0, actor_id=actor_id, done=real_done
+        )
 
-        self.ret_buffers[0].insert(episode_returns, done_ids)
-        stats = {"rmean_episode_return": self.ret_buffers[0].get_mean(),
-                 "max_episode_return": self.ret_buffers[0].get_max(),}
+        stats = {"rmean_episode_return": self.ret_buffers["re"].get_mean(),
+                 "max_episode_return": self.ret_buffers["re"].get_max(),
+                 "rmean_len": self.ret_buffers["len"].get_mean(),}
 
         for prefix in ["im", "cur"]:            
             if prefix == "im":
@@ -674,13 +698,10 @@ class SActorLearner:
             
             if prefix in self.rewards_ls:            
                 n = self.rewards_ls.index(prefix)
-                self.ret_buffers[n].insert_raw(
-                    train_actor_out.episode_return,
-                    ind=n,
-                    actor_id=actor_id,
-                    done=done,
+                self.ret_buffers[prefix].insert(
+                    train_actor_out.episode_return, ind=n, actor_id=actor_id, done=done,
                 )
-                r = self.ret_buffers[n].get_mean()
+                r = self.ret_buffers[prefix].get_mean()
                 stats["rmean_%s_episode_return" % prefix] = r
 
         if not self.disable_thinker:

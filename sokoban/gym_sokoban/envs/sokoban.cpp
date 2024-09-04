@@ -328,20 +328,22 @@ void Sokoban::render(unsigned char* obs) {
 	out.close();*/
 }
 
-void Sokoban::reset(unsigned char* obs) {	
+void Sokoban::reset(unsigned char* obs, bool& cost) {	
 	uniform_int_distribution<int> roomDist(0, level_num - 1);
 	uniform_int_distribution<int> stepDist(0, 5);
 	int room_id = roomDist(defEngine);	
 	// std::cout << "sampling from " << level_num * 1000 - 1 << " and get " << room_id << " seed : " << seed << endl;
-	read_level(room_id);
+	read_level(room_id);	
 	step_n = stepDist(defEngine);
+	cost = (room_status[player_pos_y][player_pos_x] == roomStatus::player_on_dan);
 	render(obs);
 }
 
-void Sokoban::reset_level(unsigned char* obs, const int room_id) {
+void Sokoban::reset_level(unsigned char* obs, const int room_id, bool& cost) {
 	read_level(room_id);
 	uniform_int_distribution<int> stepDist(0, 5);
 	step_n = stepDist(defEngine);
+	cost = (room_status[player_pos_y][player_pos_x] == roomStatus::player_on_dan);
 	render(obs);
 }
 

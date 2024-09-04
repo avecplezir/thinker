@@ -1,4 +1,4 @@
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 __project__ = "thinker"
 
 import collections
@@ -14,7 +14,7 @@ import sys
 import math
 import logging
 from matplotlib import pyplot as plt
-from gym import spaces
+from gymnasium import spaces
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -27,44 +27,46 @@ _fields += ("max_rollout_depth", "step_status")
 _fields += ("last_pri", "last_reset", "cur_gate")
 EnvOut = namedtuple("EnvOut", _fields)   
 
-def init_env_out(state, flags, dim_actions, tuple_action):
-        # minimum env_out for actor_net
-        num_rewards = 1        
-        num_rewards += int(flags.im_cost > 0.0)
-        num_rewards += int(flags.cur_cost > 0.0)
+def init_env_out(state, info, flags, dim_actions, tuple_action):
+    # minimum env_out for actor_net
+    num_rewards = 1        
+    num_rewards += int(flags.im_cost > 0.0)
+    num_rewards += int(flags.cur_cost > 0.0)
 
-        env_n = state["real_states"].shape[0]
-        device = state["real_states"].device
+    env_n = state["real_states"].shape[0]
+    device = state["real_states"].device
 
-        last_pri_shape = (env_n, dim_actions) if tuple_action else (env_n)
-        out = {
-            "last_pri": torch.zeros(last_pri_shape, dtype=torch.long, device=device),
-            "last_reset": torch.zeros(env_n, dtype=torch.long, device=device),
-            "reward": torch.zeros((env_n, num_rewards), 
-                                dtype=torch.float, device=device),
-            "done": torch.zeros(env_n, dtype=torch.bool, device=device),
-            "step_status": torch.zeros(env_n, dtype=torch.long, device=device),
-        }
+    last_pri_shape = (env_n, dim_actions) if tuple_action else (env_n)
+    out = {
+        "last_pri": torch.zeros(last_pri_shape, dtype=torch.long, device=device),
+        "last_reset": torch.zeros(env_n, dtype=torch.long, device=device),
+        "reward": torch.zeros((env_n, num_rewards), 
+                            dtype=torch.float, device=device),
+        "done": torch.zeros(env_n, dtype=torch.bool, device=device),
+        "truncated_done": torch.zeros(env_n, dtype=torch.long, device=device),
+    }
 
-        for field in EnvOut._fields:    
-            if field not in out:
-                out[field] = None
-            else:
-                continue
-            if field in state.keys():
-                out[field] = state[field]
+    for field in EnvOut._fields:    
+        if field not in out:
+            out[field] = None
+        else:
+            continue
+        if field in state.keys():
+            out[field] = state[field]
+        if field in info.keys():
+            out[field] = info[field]
 
-        for k, v in out.items():
-            if v is not None:
-                out[k] = torch.unsqueeze(v, dim=0)
-        env_out = EnvOut(**out)        
-        return env_out     
+    for k, v in out.items():
+        if v is not None:
+            out[k] = torch.unsqueeze(v, dim=0)
+    env_out = EnvOut(**out)        
+    return env_out     
 
-def create_env_out(action, state, reward, done, info, flags):
+def create_env_out(action, state, reward, done, truncated_done, info, flags):
     
     aug_reward = [reward]
     if flags.im_cost > 0:
-        aug_reward.append(info["im_reward"])
+        aug_reward.append(info["im_reward"][:, 0])
     if flags.cur_cost > 0:
         aug_reward.append(info["cur_reward"])
     aug_reward = torch.stack(aug_reward, dim=-1)
@@ -79,10 +81,12 @@ def create_env_out(action, state, reward, done, info, flags):
     else:
         aug_epsoide_return = None
     
-    out = {"reward": aug_reward, 
-            "episode_return": aug_epsoide_return,
-            "done": done,
-            }
+    out = {
+        "reward": aug_reward, 
+        "episode_return": aug_epsoide_return,
+        "done": done,
+        "truncated_done": truncated_done,           
+    }
     if not flags.wrapper_type == 1:    
         out["last_pri"] = action[0]
         out["last_reset"] = action[1]
@@ -113,9 +117,6 @@ def process_flags(flags):
         flags.cur_enable = False
         flags.return_h = False
         flags.return_double = False
-
-    if flags.sample_n > 0:
-        assert flags.wrapper_type == 0, "sampled-based mode only supported on wrapper_type 0"
 
     if check_perfect_model(flags.wrapper_type):
         flags.dual_net = False
@@ -561,18 +562,11 @@ def compute_grad_norm(parameters, norm_type=2.0):
     )
     return total_norm
 
-def slice_tree_reps(num_actions, dim_actions, sample_n, rec_t):
+def slice_tree_reps(num_actions, dim_actions, rec_t):
     idx1 = num_actions * 5 + 6
-    sample = sample_n > 0
-    if sample:
-        idx2 = idx1 + sample_n * dim_actions
-    else:
-        idx2 = idx1
+    idx2 = idx1
     idx3 = idx2 + num_actions * 5 + 3
-    if sample:
-        idx4 = idx3 + sample_n * dim_actions
-    else:
-        idx4 = idx3
+    idx4 = idx3
     idx5 = idx4 + 2 + rec_t  
     tree_rep_map = [
         ["root_action", 0],
@@ -607,7 +601,7 @@ def slice_tree_reps(num_actions, dim_actions, sample_n, rec_t):
         tree_rep_map_d[k] = slice(idx, next_idx)    
     return tree_rep_map_d
 
-def decode_tree_reps(tree_reps, num_actions, dim_actions, sample_n, rec_t, enc_type=0, f_type=0):
+def decode_tree_reps(tree_reps, num_actions, dim_actions, rec_t, enc_type=0, f_type=0):
     nd = [
             "root_r", "root_v", "root_qs_mean", "root_qs_max", 
             "root_trail_r", "rollout_return", "max_rollout_return", 
@@ -622,7 +616,7 @@ def decode_tree_reps(tree_reps, num_actions, dim_actions, sample_n, rec_t, enc_t
     if len(tree_reps.shape) == 3:
         tree_reps = tree_reps[0]
 
-    d = slice_tree_reps(num_actions, dim_actions, sample_n, rec_t)
+    d = slice_tree_reps(num_actions, dim_actions, rec_t)
     return {k: dec_k(tree_reps[:, v], k) for k, v in d.items()}
 
 def mask_tree_rep(tree_reps, num_actions, rec_t):

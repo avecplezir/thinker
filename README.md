@@ -1,6 +1,6 @@
 
-# Thinker: Learning to Plan and Act
 
+# Thinker: Learning to Plan and Act
 This is the official repository for the paper titled [*Thinker: Learning to Plan and Act*](https://arxiv.org/abs/2307.14993). Please refer to the [project website](https://stephen-c.com/thinker) for details of the algorithm.
 
 ## Table of Contents
@@ -47,14 +47,6 @@ cd thinker
 pip install -e .
 ```
 
-If you encounter the following error:
-
-```
-ERROR: Could not find a version that satisfies the requirement ale-py~=0.7.4; extra == "atari" (from gym[atari]) (from versions: 0.8.0, 0.8.1, 0.9.0)
-```
-
-downgrade the Python version to 3.10 or below. Alternatively, you can remove `gym[atari]==0.22.0` from `thinker/requirements.txt` if you do not intend to run experiments on Atari.
-
 ## Training in Thinker-augmented MDPs
 To train actor-critic (IMPALA) on the Thinker-augmented MDP, run the following commands in the `thinker` directory:
 
@@ -64,14 +56,19 @@ Sokoban default run:
 python train.py
 ```
 
-Atari default run (change the environment if needed):
+Atari default run (change the environment if needed; by default the standard atari wrapper such as 4-frame-stacking will be applied):
 
 ```bash
-python train.py --name BreakoutNoFrameskip-v4 --atari true --reward_clip 1 --model_size_nn 2 --discounting 0.99
+python train.py --name BreakoutNoFrameskip-v4 --reward_clip 1 --model_size_nn 2 --discounting 0.99
 ```
 
 - To understand how the Thinker-augmented MDP can be used with an actor-critic network, please refer to [this example notebook](notebook/example.ipynb).
 - The above runs are used to generate the results of the Thinker-augmented MDP in Figure 5 and Figure 9 of the paper, but some hyper-parameters have been optimized further in the current version. To use the same hyper-parameters as in the paper, add `--actor_learning_rate 0.0006`.
+- For Atari, we also support [EnvPool](https://github.com/sail-sg/envpool/) for faster computation. To use EnvPool, first install the modified version of EnvPool from [here](https://github.com/stephen-chung-mh/envpool/releases/tag/v0.0.3) (please download the correct version and run `pip install $FILE_NAME.whl` ; you need to compile the repo manually if your Python version / OS cannot be found.) Then run (`Breakout-v5` in EnvPool is the same as `BreakoutNoFrameskip-v4` in Gym):
+
+```bash
+python train.py --name Breakout-v5 --reward_clip 1 --model_size_nn 2 --discounting 0.99 --envpool True
+```
 
 **Troubleshooting**
 - If running out of GPU memory, try using mixed precision by adding `--float16 true`.
@@ -128,7 +125,7 @@ To visualize a specific run, follow the steps below:
 
 1.  Identify the experiment ID of the run you want to visualize. By default, it is in the format: `Thinker-{DATE}-{TIME}`. This ID should be displayed in the standard output during your experiment run.    
 2.  Use the following command, replacing `$XPID` with the experiment ID:
-    
+
 ```bash
 python visual.py --xpid $XPID
 ```
@@ -186,7 +183,7 @@ Note that the first method will take precedence over the second method.
 
 By default, environments like `Sokoban-v0`, as well as other Atari environments such as `BreakoutNoFrameskip-v4` and `SeaquestNoFrameskip-v4`, can be passed to the `Thinker.make` method. The `Thinker.make` method internally calls `gym.make` using the provided environment name to instantiate the environment. 
 
-Pass `atari=True` to apply the standard Atari wrapper is applied: 
+By default, the following Atari wrapper is applied (except for Sokoban environment):
 - 4-frame stacking, 
 - up to 30 random no-ops at the start, 
 - resizing the image to 3x84x84, 
@@ -196,7 +193,7 @@ Pass `atari=True` to apply the standard Atari wrapper is applied:
 Example:
 
 ```py
-env = Thinker.make("BreakoutNoFrameskip-v4", atari=True, env_n=16, config='custom.yaml')
+env = Thinker.make("BreakoutNoFrameskip-v4", env_n=16, config='custom.yaml')
 ```
 
 You can also provide custom environments. To do this, supply an `env_fn` function that, when invoked as `env_fn()`, returns a Gym environment:
@@ -231,10 +228,10 @@ The environment simulator means that we have access to the dynamics of the envir
 
 The environment simulator version works with both Sokoban and Atari games. For custom environments, please ensure that the environment has the following two methods:
 
-- `clone_state()`: Returns the savepoint of the environment as a dictionary.
-- `restore_state(state)`: state should be the state returned by `clone_state()`; this loads the environment to the savepoint.
+- `quick_save()`: Save the current state of the environment. No return is needed.
+- `quick_load()`: Restore to the state saved in `quick_save()`; will only be called after `quick_save()`. No return is needed.
 
-For an illustration, see the `StateWrapper` method in `thinker/thinker/wrapper.py`, which wraps Gym's Atari environments to provide these two methods.
+For an illustration, see the `AtariSaveLoad` method in `thinker/thinker/gym_add/wrapper.py`, which wraps Gym's Atari environments to provide these two methods.
 
 
 ## Resource Management
@@ -276,7 +273,7 @@ See `thinker/train.py` and `thinker/thinker/self_play.py` for an example of usin
 To resume from a previously saved checkpoint:
 1.  Identify the `XPID` (Experiment ID) of the run you want to resume. By default, it is in the format: `Thinker-{DATE}-{TIME}`. This ID should be displayed in the standard output during your experiment run.    
 2.  Set the `ckp` parameter to `True` when invoking `thinker.make`. For those using mode 3, you should set these parameters in the `ray_init` function.
-    
+
 
 Example:
 
@@ -334,12 +331,12 @@ state, reward, done, info = env.step(primary_action, reset_action, action_prob=N
 -   `primary_action`: Imaginary/real action to be taken in the environment.    
     -   Type: Torch tensor or numpy array.
     -   Shape: `(env_n,)`
-    
+
 -   `reset_action`: Reset action to be taken in the environment state.    
     -   Type: Torch tensor or numpy array.
     -   Shape: `(env_n,)`
     -   Each element must be either 0 or 1.
-    
+
 -   `action_prob` (Optional): Probability distribution over actions. This is required when `require_prob=True` is set for the environment. Passing the action probability provides a better training target for the model.  If `require_prob=False`, this `action_prob` will not be used.
     -   Type: Torch tensor or numpy array.
     -   Shape: `(env_n, num_actions)`
@@ -409,8 +406,8 @@ If you are editing the Cython files, run the following in the `sokoban` or `thin
 ```bash
 python setup.py build_ext
 ```
+```
 ### License
 This project is licensed under the MIT License - see the LICENSE file for details.
-
 ### Contact
 For any questions or discussions, please contact me at mhc48@cam.ac.uk.

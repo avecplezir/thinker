@@ -7,8 +7,7 @@ from thinker import util
 from thinker.core.rnn import ConvAttnLSTM
 from thinker.core.module import MLP, OneDResBlock, tile_and_concat_tensors
 from thinker.model_net import RVTran
-from thinker.legacy import AFrameEncoderLegacy
-from gym import spaces
+from gymnasium import spaces
 
 ActorOut = namedtuple(
     "ActorOut",
@@ -275,8 +274,7 @@ class ActorBaseNet(nn.Module):
         self.num_rewards += int(flags.cur_cost > 0.0)
         self.enc_type = flags.critic_enc_type  
         self.rv_tran = None
-        self.critic_zero_init = flags.critic_zero_init         
-        self.legacy = getattr(flags, "legacy", False)  
+        self.critic_zero_init = flags.critic_zero_init     
 
         # action space processing
         self.num_actions, self.dim_actions, self.dim_rep_actions, self.tuple_action, self.discrete_action = \
@@ -292,10 +290,7 @@ class ActorBaseNet(nn.Module):
         # state space processing
         self.see_tree_rep = flags.see_tree_rep and not self.disable_thinker
         if self.see_tree_rep:
-            self.tree_reps_shape = obs_space["tree_reps"].shape[1:]             
-            if self.legacy:
-                self.tree_reps_shape = list(self.tree_reps_shape)
-                self.tree_reps_shape[0] -= 2
+            self.tree_reps_shape = obs_space["tree_reps"].shape[1:]   
 
         self.see_h = flags.see_h and not self.disable_thinker
         if self.see_h:
@@ -315,7 +310,14 @@ class ActorBaseNet(nn.Module):
                 self.register_buffer("norm_high", high)
             self.real_states_shape = obs_space["real_states"].shape[1:]     
 
-        if getattr(flags, "ppo_k", 1) > 1:
+        self.autotune = flags.autotune
+        if self.autotune:
+            log_entropy_cost = nn.Parameter(torch.log(torch.full((1,), 0.1)))
+            log_im_entropy_cost = nn.Parameter(torch.log(torch.full((1,), 0.1)))
+            self.register_parameter("log_entropy_cost", log_entropy_cost)
+            self.register_parameter("log_im_entropy_cost", log_im_entropy_cost)
+
+        if flags.ppo_k > 1:
             kl_beta = torch.tensor(1.)
             self.register_buffer("kl_beta", kl_beta)
 
@@ -395,24 +397,24 @@ class ActorNetSingle(ActorBaseNet):
             self.register_buffer("max_log_var", max_log_var)   
 
         self.tran_dim = flags.tran_dim 
+        self.tran_reset_mode = flags.tran_reset_mode
         self.tree_rep_rnn = flags.tree_rep_rnn and flags.see_tree_rep         
         self.se_lstm_table = getattr(flags, "se_lstm_table", False) and flags.see_tree_rep and flags.wrapper_type in [3, 4]
         self.x_rnn = flags.x_rnn and flags.see_x  
         self.h_rnn = flags.h_rnn and flags.see_h
-        self.real_state_rnn = flags.real_state_rnn and flags.see_real_state 
+        self.real_state_rnn = flags.real_state_rnn and flags.see_real_state         
 
         self.sep_im_head = flags.sep_im_head
         self.last_layer_n = flags.last_layer_n
           
         # encoder for state or encoding output
         last_out_size = self.dim_rep_actions + self.num_rewards
-        if self.legacy: last_out_size += self.dim_rep_actions
 
         if not self.disable_thinker:
             last_out_size += 2
 
         if self.see_h:
-            FrameEncoder = AFrameEncoder if not self.legacy else AFrameEncoderLegacy
+            FrameEncoder = AFrameEncoder 
             self.h_encoder = FrameEncoder(
                 input_shape=self.hs_shape,                    
                 flags=flags,                      
@@ -428,7 +430,7 @@ class ActorNetSingle(ActorBaseNet):
             last_out_size += h_out_size   
         
         if self.see_x:
-            FrameEncoder = AFrameEncoder if not self.legacy else AFrameEncoderLegacy
+            FrameEncoder = AFrameEncoder 
             self.x_encoder_pre = FrameEncoder(
                 input_shape=self.xs_shape,                 
                 flags=flags,
@@ -437,7 +439,7 @@ class ActorNetSingle(ActorBaseNet):
             )
             x_out_size = self.x_encoder_pre.out_size
             if self.x_rnn:
-                rnn_in_size = x_out_size
+                rnn_in_size = x_out_size + self.dim_rep_actions + 2
                 self.x_encoder_rnn = RNNEncoder(
                     in_size=rnn_in_size,
                     flags=flags,
@@ -446,13 +448,19 @@ class ActorNetSingle(ActorBaseNet):
             last_out_size += x_out_size           
 
         if self.see_real_state:
+            self.real_state_ch = getattr(flags, "real_state_ch", -1)
+            if self.real_state_ch > 0:
+                self.real_states_shape = list(self.real_states_shape)
+                self.real_states_shape[0] = int(self.real_state_ch)
+                self.real_states_shape = tuple(self.real_states_shape)            
             self.real_state_encoder =  AFrameEncoder(
                 input_shape=self.real_states_shape,                 
                 flags=flags,
                 downpool=True,
                 firstpool=True,
-            )
+            )                        
             r_out_size = self.real_state_encoder.out_size
+            self.pre_r_shape = (r_out_size,)
             if self.real_state_rnn:
                 rnn_in_size = r_out_size
                 self.r_encoder_rnn = RNNEncoder(
@@ -460,6 +468,7 @@ class ActorNetSingle(ActorBaseNet):
                     flags=flags,
                 )
                 r_out_size = flags.tran_dim   
+            self.post_r_shape = (r_out_size,)
             last_out_size += r_out_size       
 
         if self.see_tree_rep:            
@@ -566,6 +575,17 @@ class ActorNetSingle(ActorBaseNet):
                 self.state_idx[state_name] = slice(idx, idx+len(core_state))
                 idx += len(core_state)
 
+        if self.see_real_state:
+            pre_encoded_real_state = torch.zeros((batch_size,) + self.pre_r_shape, device=device)
+            initial_state = initial_state + (pre_encoded_real_state,)
+            self.state_idx["pre_encoded_real_state"] = slice(idx, idx+1)
+            idx += 1
+
+            encoded_real_state = torch.zeros((batch_size,) + self.post_r_shape, device=device)
+            initial_state = initial_state + (encoded_real_state,)
+            self.state_idx["encoded_real_state"] = slice(idx, idx+1)
+            idx += 1
+
         self.state_len = idx
         return initial_state
     
@@ -603,14 +623,19 @@ class ActorNetSingle(ActorBaseNet):
         assert len(core_state) == self.state_len, "core_state should have length %d" % self.state_len
         new_core_state = [None] * self.state_len
 
+        if self.tran_reset_mode == 0:
+            rnn_done = env_out.done
+        elif self.tran_reset_mode == 1:
+            rnn_done = env_out.real_done
+        else:
+            rnn_done = torch.zeros_like(env_out.done)
+
         final_out = []
         
         last_pri = torch.flatten(env_out.last_pri, 0, 1)
         if not self.tuple_action: last_pri = last_pri.unsqueeze(-1)
         last_pri = util.encode_action(last_pri, self.pri_action_space)   
         final_out.append(last_pri)
-        if self.legacy:
-            final_out.append(last_pri)
 
         if not self.disable_thinker:
             last_reset = torch.flatten(env_out.last_reset, 0, 1)
@@ -619,17 +644,12 @@ class ActorNetSingle(ActorBaseNet):
 
         reward = env_out.reward
         reward[torch.isnan(reward)] = 0.
-        last_reward = torch.clamp(torch.flatten(reward, 0, 1), -1, +1)
+        last_reward = torch.clamp(torch.flatten(reward, 0, 1), -1, +1).float()
         final_out.append(last_reward)
 
         if self.see_tree_rep:                
             tree_rep = env_out.tree_reps               
             tree_rep = torch.flatten(tree_rep, 0, 1)     
-            if self.legacy:
-                indices_to_remove = [self.num_actions+1, self.num_actions*5+6 + self.num_actions+1]
-                mask = torch.ones(tree_rep.shape[1], dtype=torch.bool, device=tree_rep.device)
-                mask[indices_to_remove] = False
-                tree_rep = tree_rep[:, mask]
 
             if self.se_lstm_table:
                 root_table = tree_rep[:, self.root_table_mask]
@@ -645,7 +665,7 @@ class ActorNetSingle(ActorBaseNet):
             if self.tree_rep_rnn:
                 core_state_ = core_state[self.state_idx['tree_rep']]
                 encoded_tree_rep, core_state_ = self.tree_rep_encoder(
-                    tree_rep, done, core_state_)
+                    tree_rep, rnn_done, core_state_)
                 new_core_state[self.state_idx['tree_rep']] = core_state_
             else:
                 encoded_tree_rep = self.tree_rep_encoder(tree_rep)
@@ -654,13 +674,11 @@ class ActorNetSingle(ActorBaseNet):
         if self.see_h:
             hs = torch.flatten(env_out.hs, 0, 1)
             encoded_h = self.h_encoder(hs)            
-            if self.legacy and self.see_tree_rep:
-                final_out[-1], final_out[-2] = final_out[-2], final_out[-1]
 
             if self.h_rnn:
                 core_state_ = core_state[self.state_idx['h']]
                 encoded_h, core_state_ = self.h_encoder_rnn(
-                    encoded_h, done, core_state_)
+                    encoded_h, rnn_done, core_state_)
                 new_core_state[self.state_idx['h']] = core_state_
 
             final_out.append(encoded_h)                
@@ -672,30 +690,21 @@ class ActorNetSingle(ActorBaseNet):
             if self.float16: encoded_x = encoded_x.float()
                 
             if self.x_rnn:
-                core_state_ = core_state[self.state_idx['x']]
+                encoded_x = torch.concat([encoded_x, last_pri, last_reset], dim=-1)
+                core_state_ = core_state[self.state_idx['x']]                
                 encoded_x, core_state_ = self.x_encoder_rnn(
-                    encoded_x, done, core_state_)
+                    encoded_x, rnn_done, core_state_)
                 new_core_state[self.state_idx['x']] = core_state_
             
             final_out.append(encoded_x)
 
         if self.see_real_state:
-            real_states = torch.flatten(env_out.real_states, 0, 1)   
-            real_states = self.normalize(real_states.float())
-            with autocast(enabled=self.float16):      
-                encoded_real_state = self.real_state_encoder(real_states, record_state=self.record_state)
-            if self.float16: encoded_real_state = encoded_real_state.float()
-
+            pre_encoded_real_state, encoded_real_state, core_state_, pre_reg_loss = self.compute_encoded_real_state(env_out, core_state, rnn_done)
             if self.real_state_rnn:
-                core_state_ = core_state[self.state_idx['r']]
-                encoded_real_state, core_state_ = self.r_encoder_rnn(
-                    encoded_real_state, done, core_state_, record_state=self.record_state)
                 new_core_state[self.state_idx['r']] = core_state_
-                if self.record_state: self.hidden_state = self.r_encoder_rnn.rnn.hidden_state
-            else:
-                if self.record_state: self.hidden_state = self.real_state_encoder.hidden_state
-
-            final_out.append(encoded_real_state)
+            new_core_state[self.state_idx['pre_encoded_real_state']] = (pre_encoded_real_state[-B:],)
+            new_core_state[self.state_idx['encoded_real_state']] = (encoded_real_state[-B:],)
+            final_out.append(encoded_real_state)        
 
         final_out = torch.concat(final_out, dim=-1)   
 
@@ -863,6 +872,8 @@ class ActorNetSingle(ActorBaseNet):
                 reg_loss += (
                     + 1e-3 * torch.sum(reset_logits**2, dim=-1) / 2
                 )
+                if self.see_real_state:
+                    reg_loss += 1e-5 * pre_reg_loss
         else:
             reg_loss = None
         
@@ -882,6 +893,74 @@ class ActorNetSingle(ActorBaseNet):
         )
         core_state = tuple(new_core_state)
         return actor_out, core_state    
+    
+    def compute_encoded_real_state(self, env_out, core_state, rnn_done):
+        T, B = env_out.step_status.shape[:2]
+        core_state_ = core_state[self.state_idx['r']] if self.real_state_rnn else None
+        need_update = (env_out.step_status == 0) | (env_out.step_status == 3)
+        requires_grad = env_out.real_states.requires_grad
+        if requires_grad: need_update[0] = True
+        assert torch.all(need_update == need_update[:,[0]]), f"expect uniform step_status, not ({env_out.step_status.shape}) {env_out.step_status}"
+
+        need_update = need_update[:, 0] # shape (T,)
+        if torch.all(~need_update):
+            last_pre_encoded_real_state = core_state[self.state_idx['pre_encoded_real_state']][0]            
+            expand_shape = (T,) + (1,) * (len(last_pre_encoded_real_state.shape) - 1)
+            pre_encoded_real_state = last_pre_encoded_real_state.repeat(*expand_shape)            
+            last_encoded_real_state = core_state[self.state_idx['encoded_real_state']][0]            
+            expand_shape = (T,) + (1,) * (len(last_encoded_real_state.shape) - 1)
+            encoded_real_state = last_encoded_real_state.repeat(*expand_shape)            
+            new_core_state = core_state_
+            return pre_encoded_real_state, encoded_real_state, new_core_state, 0. # should only happen in self-play
+
+        real_states = env_out.real_states
+        if real_states.shape[0] == T:
+            real_states = real_states[need_update]        
+        else:
+            real_states = real_states[:torch.sum(need_update).item()]
+        real_states = self.normalize(real_states.float())
+        with autocast(enabled=self.float16): 
+            real_states = torch.flatten(real_states, 0, 1)
+            if self.real_state_ch > 0:
+                real_states = real_states[:, -self.real_state_ch:]
+            pre_encoded_real_state = self.real_state_encoder(real_states)  
+
+        if self.float16: pre_encoded_real_state = pre_encoded_real_state.float()        
+
+        if self.real_state_rnn:
+            rnn_done = rnn_done[need_update]
+            encoded_real_state, new_core_state = self.r_encoder_rnn(
+                pre_encoded_real_state, rnn_done, core_state_, record_state=self.record_state)
+            if self.record_state: self.hidden_state = self.r_encoder_rnn.rnn.hidden_state
+        else:
+            if self.record_state: self.hidden_state = self.real_state_encoder.hidden_state
+            new_core_state = None
+            encoded_real_state = pre_encoded_real_state       
+
+        last_x = core_state[self.state_idx['pre_encoded_real_state']][0]
+        xs = pre_encoded_real_state        
+        pre_encoded_real_state = self.repeat_for_no_update(last_x, xs, need_update, B)
+
+        last_x = core_state[self.state_idx['encoded_real_state']][0]
+        xs = encoded_real_state        
+        encoded_real_state = self.repeat_for_no_update(last_x, xs, need_update, B)
+
+        pre_reg_loss = torch.sum(torch.square(pre_encoded_real_state.view(T, B, -1)), dim=-1) / 2
+        return pre_encoded_real_state, encoded_real_state, new_core_state, pre_reg_loss
+
+    def repeat_for_no_update(self, last_x, xs, need_update, B):
+        k = 0
+        K = int(torch.sum(need_update).cpu().detach().item())
+        T = need_update.shape[0]
+        xs = xs.view((K, B) + xs.shape[1:])
+        xs_ls = []
+        for t in range(T):
+            if need_update[t]:
+                last_x = xs[k]
+                k += 1
+            xs_ls.append(last_x)        
+        xs = torch.stack(xs_ls)
+        return torch.flatten(xs, 0, 1)
 
 class DRCNet(ActorBaseNet):
     def __init__(self, obs_space, action_space, flags, tree_rep_meaning=None, record_state=False):

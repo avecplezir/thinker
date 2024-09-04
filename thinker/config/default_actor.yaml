@@ -26,6 +26,9 @@ baseline_cost: 0.5 # cost for computing baseline
 entropy_r_cost: 0. # entropy cost added to reward
 entropy_cost: 0.001 # entropy cost for real actions
 im_entropy_cost: 0.0001 # entropy cost for imaginary actions
+autotune: false # autotune the entropy_cost and im_entropy_cost
+tar_entropy_scale: 0.4 # target policy entropy; 1 for uniform policy so it should be less than 1
+tar_im_entropy_scale: 0.4 # target imaginary policy entropy; 1 for uniform policy so it should be less than 1
 reg_cost: 0.001 # regularization cost
 # actor setting
 # - general
@@ -44,6 +47,7 @@ se_lstm_table: true # whether to use lstm to enablde tables
 x_rnn: false # whether to use rnn in processing x, model's predicted state
 h_rnn: false # whether to use rnn in processing h, model's recurrent state
 real_state_rnn: false # whether to use rnn in processing real state
+real_state_ch: -1 # limit the number of channel of real state that agent sees; -1 for seeing all channels
 enc_1d_shallow: false # whether to use shallow encoding (1d input only)
 enc_1d_norm: true # enable layer normalization in 1d encoder
 enc_1d_block: 2 # number of res block for 1d encoder
@@ -56,6 +60,7 @@ tran_head_n: 8 # number of head for each attention layer
 tran_lstm_no_attn: false # whether to disable the attention module in lstm-attn
 tran_attn_b: 5 # initial bias for attending to the current step
 tran_dim: 128 # hidden dimension of lstm-attn
+tran_reset_mode: 0 # 0: reset when done; 1: reset when real done; 2: never reset
 # -critic setting
 critic_zero_init: true # whether to zero initialize the critic outputs
 critic_enc_type: 0 # reward / value encoding type for the critic; 0 for no encoding, 1 for scalar encoding, 2 for unbiased vector encoding, 3 for biased vector encoding

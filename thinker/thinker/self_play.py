@@ -119,8 +119,8 @@ class SelfPlayWorker:
             if verbose:
                 self._logger.info("Actor %d started." % self.rank)
             n = 0
-            state = self.env.reset()
-            env_out = self.init_env_out(state)                        
+            state, info = self.env.reset()
+            env_out = self.init_env_out(state, info)                        
             actor_state = self.actor_net.initial_state(
                     batch_size=self.env_n, device=self.device
             )
@@ -237,11 +237,11 @@ class SelfPlayWorker:
             primary_action, reset_action = actor_out.action
         else:
             primary_action, reset_action = actor_out.action, None
-        state, reward, done, info = self.env.step(
+        state, reward, done, truncated_done, info = self.env.step(
                 primary_action=primary_action, 
                 reset_action=reset_action, 
                 action_prob=actor_out.action_prob[-1])
-        env_out = self.create_env_out(actor_out.action, state, reward, done, info)
+        env_out = self.create_env_out(actor_out.action, state, reward, done, truncated_done, info)
         return actor_out, actor_state, env_out, info
 
     def write_actor_buffer(self, env_out: EnvOut, actor_out: ActorOut, t: int, log_only: bool = False):
@@ -259,8 +259,12 @@ class SelfPlayWorker:
                 val = getattr(env_out if field in EnvOut._fields else actor_out, field)                
                 if val is None: continue
                 if self.flags.parallel_actor:
+                    size_t = self.flags.actor_unroll_len + 1
+                    if not self.disable_thinker and field =="real_states":
+                        size_t = size_t // self.flags.rec_t + int((size_t % self.flags.rec_t) > 0)                        
+                        self.real_state_t = 0
                     out[field] = torch.empty(
-                        size=(self.flags.actor_unroll_len + 1, self.env_n)
+                        size=(size_t, self.env_n)
                         + val.shape[2:],
                         dtype=val.dtype,
                         device=self.device,
@@ -287,7 +291,13 @@ class SelfPlayWorker:
                 assert new_val is not None, f"{field} cannot be None"
                 new_val = new_val[0]
                 if self.flags.parallel_actor:
-                    v[t] = new_val
+                    if not self.disable_thinker and field =="real_states":                        
+                        if env_out.step_status[0, 0].item() in [0, 3]:
+                            # assume uniform step status
+                            v[self.real_state_t] = new_val
+                            self.real_state_t += 1
+                    else:                        
+                        v[t] = new_val
                 else:
                     v.append(new_val)
 

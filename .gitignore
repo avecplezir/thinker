@@ -9,6 +9,7 @@ hpc/
 wandb
 *.pyc
 *.pyd
+*.pth
 *.so
 .vscode
 sokoban/build

@@ -5,15 +5,16 @@ from collections import namedtuple
 import ray
 import numpy as np
 import torch
+import gymnasium as gym
+
 import thinker.util as util
 from thinker.buffer import ModelBuffer, SModelBuffer, GeneralBuffer
 from thinker.learn_model import ModelLearner, SModelLearner
 from thinker.model_net import ModelNet
+
 from thinker.gym_add.asyn_vector_env import AsyncVectorEnv
-import thinker.wrapper as wrapper
+import thinker.gym_add.wrapper as wrapper
 from thinker.cenv import cModelWrapper, cPerfectWrapper
-import gym
-#from gym.wrappers import NormalizeObservation
 
 def ray_init(flags=None, **kwargs):
     # initialize resources for Thinker wrapper
@@ -88,37 +89,39 @@ class Env(gym.Wrapper):
                 "cuda" if self.device == torch.device("cuda") else "cpu",
             )
         )
-        if env_fn is None: env_fn = wrapper.create_env_fn(name, self.flags)
-        # initialize a single env to collect env information
-        env = env_fn()
-        assert len(env.observation_space.shape) in [1, 3], \
-            f"env.observation_space should be 1d or 3d, not {env.observation_space.shape}"
+        if self.flags.envpool:
+            env = wrapper.create_envpool(name, self.flags, env_n)
+        else:
+            if env_fn is None: 
+                env_fn = wrapper.create_env_fn(name, self.flags)
+            # initialize a single env to collect env information            
+            env = AsyncVectorEnv([env_fn for _ in range(env_n)]) 
+        env = wrapper.VectorWrap(env, self.flags)
+
+        
+        self.real_state_space  = env.get_wrapper_attr('single_observation_space')
+        self.real_state_shape = self.real_state_space.shape
+
+        assert len(self.real_state_shape) in [1, 3], \
+            f"env.observation_space should be 1d or 3d, not {self.real_state_shape}"
         # assert type(env.action_space) in [gym.spaces.discrete.Discrete, gym.spaces.tuple.Tuple], \
         #    f"env.action_space should be Discrete or Tuple, not {type(env.action_space)}"  
         
-        if env.observation_space.dtype == 'uint8':
+        if self.real_state_space.dtype == 'uint8':
             self.state_dtype = 0
-        elif env.observation_space.dtype == 'float32':
-            self.state_dtype = 1        
-        
-        self.real_state_space  = env.observation_space
-        self.real_state_shape = env.observation_space.shape
+        elif self.real_state_space.dtype == 'float32':
+            self.state_dtype = 1                
 
-        self.pri_action_space = env.action_space
+        self.pri_action_space = env.get_wrapper_attr('single_action_space')
         self.num_actions, self.dim_actions, self.dim_rep_actions, self.tuple_action, self.discrete_action = \
             util.process_action_space(self.pri_action_space)
 
         if isinstance(self.pri_action_space, gym.spaces.Box):
-            assert len(env.action_space.shape) == 1, f"Invalid action space {env.action_space}"
+            assert len(self.pri_action_space) == 1, f"Invalid action space {self.pri_action_space}"
 
-        self._logger.info(f"Init. environment with obs space \033[91m{env.observation_space}\033[0m and action space \033[91m{env.action_space}\033[0m")        
-        self.sample = self.flags.sample_n > 0
-        self.sample_n = self.flags.sample_n
+        self._logger.info(f"Init. environment with obs space \033[91m{self.real_state_space}\033[0m and action space \033[91m{self.pri_action_space}\033[0m")        
 
-        if self.sample:
-            self.pri_action_shape = (self.env_n,)
-            self.action_prob_shape = (self.env_n, self.sample_n,)
-        elif self.tuple_action:
+        if self.tuple_action:
             self.pri_action_shape = (self.env_n, self.dim_actions)
             if self.discrete_action:
                 self.action_prob_shape = self.pri_action_shape + (self.num_actions,)
@@ -128,21 +131,22 @@ class Env(gym.Wrapper):
             self.pri_action_shape = (self.env_n,)
             self.action_prob_shape = (self.env_n, self.num_actions,)
 
-        self.frame_stack_n = env.frame_stack_n if hasattr(env, "frame_stack_n") else 1
+        try:
+            self.frame_stack_n = env.get_wrapper_attr('frame_stack_n')
+        except AttributeError as e:
+            self.frame_stack_n = 1        
+        if self.rank == 0 and self.frame_stack_n > 1:
+            self._logger.info("Detected frame stacking with %d counts" % self.frame_stack_n)
+        
         self.frame_ch = env.observation_space.shape[0] // self.frame_stack_n
         self.model_mem_unroll_len = self.flags.model_mem_unroll_len
         self.pre_len = self.frame_stack_n - 1 + self.model_mem_unroll_len
         self.post_len = self.flags.model_unroll_len + self.flags.model_return_n + 1
 
-        if self.rank == 0 and self.frame_stack_n > 1:
-            self._logger.info("Detected frame stacking with %d counts" % self.frame_stack_n)
-        env.close()
-
         # initalize model
         self.has_model = self.flags.has_model
         self.train_model = self.has_model and self.flags.train_model 
         self.require_prob = False
-        self.sample = self.flags.sample_n > 0
         if self.has_model:
             model_param = {
                 "obs_space": self.real_state_space,                
@@ -185,24 +189,11 @@ class Env(gym.Wrapper):
             self.per_state_shape = {k:v.shape[1:] for k, v in per_state.items()}
         else:
             self.model_net = None            
-            
-        # create batched asyn. environments
-        env = AsyncVectorEnv([env_fn for _ in range(env_n)]) 
-        env = wrapper.InfoConcat(env)
-        env = wrapper.RecordEpisodeStatistics(env)                      
-        if self.flags.obs_norm:
-            assert env.observation_space.dtype == np.float32  
-            env = wrapper.NormalizeObservation(env)
-        if self.flags.reward_norm:
-            env = wrapper.NormalizeReward(env, gamma=self.flags.discounting)
-        if self.flags.obs_clip > 0:
-            env = wrapper.TransformObservation(env, lambda obs: np.clip(obs, -self.flags.obs_clip, self.flags.obs_clip))
-        if self.flags.reward_clip > 0:
-            env = wrapper.TransformReward(env, lambda reward: np.clip(reward, -self.flags.reward_clip, self.flags.reward_clip))
-
-        env.seed([i for i in range(
+        
+        self.env_seed =  list(range(
             self.rank * env_n + self.flags.base_seed, 
-            self.rank * env_n + self.flags.base_seed + env_n)])       
+            self.rank * env_n + self.flags.base_seed + env_n
+        ))        
 
         if self.flags.wrapper_type == 0:
             core_wrapper = cModelWrapper
@@ -216,21 +207,22 @@ class Env(gym.Wrapper):
 
         # wrap the env with core Cython wrapper that runs
         # the core Thinker algorithm
-        env = core_wrapper(env=env, 
-                        env_n=env_n, 
-                        flags=self.flags, 
-                        model_net=self.model_net, 
-                        device=self.device, 
-                        timing=timing)
-        
+        env = core_wrapper(
+            env=env, 
+            env_n=env_n, 
+            flags=self.flags, 
+            model_net=self.model_net, 
+            device=self.device, 
+            timing=timing
+        )        
+
         if self.flags.ckp and os.path.exists(self.ckp_env_path):
             with np.load(self.ckp_env_path, allow_pickle=True) as data:
-                env.load_ckp(data)
-                    
-        # wrap the env with a wrapper that computes episode
-        # return and episode step for logging purpose;
-        # also clip the reward afterwards if set
-        env = wrapper.PostWrapper(env, self.flags, self.device) 
+                env.get_wrapper_attr('load_ckp')(data)                    
+
+        env = wrapper.PostWrapper(env, self.flags) 
+        self.tree_rep_meaning = None
+
         gym.Wrapper.__init__(self, env)                          
 
         if self.train_model:
@@ -290,9 +282,9 @@ class Env(gym.Wrapper):
         self.status = ray.get(self.status_ptr)
         self.status_ptr = self.model_buffer.get_status.remote()        
 
-    def reset(self):
-        state = self.env.reset(self.model_net)
-        if self.sample: self.sampled_action = state["sampled_action"]
+    def reset(self, seed=None):
+        if seed is None: seed = self.env_seed
+        state = self.env.reset(self.model_net, seed=seed)
         return state
 
     def step(self, primary_action, reset_action=None, action_prob=None, ignore=False):        
@@ -312,11 +304,10 @@ class Env(gym.Wrapper):
                     f"action_prob should have shape {self.action_prob_shape} not {action_prob.shape}"
         
         with torch.set_grad_enabled(False):
-            state, reward, done, info = self.env.step(action, self.model_net)  
+            state, reward, done, truncated_done, info = self.env.step(action, self.model_net)  
         last_step_real = (info["step_status"] == 0) | (info["step_status"] == 3)
         if self.train_model and not ignore and torch.any(last_step_real): 
-            self._write_send_model_buffer(state, reward, done, info, primary_action, action_prob)        
-        if self.sample: self.sampled_action = state["sampled_action"] # should refresh sampled_action only after sending model buffer
+            self._write_send_model_buffer(state, reward, done, truncated_done, info, primary_action, action_prob)        
         if self.train_model:
             if self.parallel:
                 if self.counter % 200 == 0: self._refresh_wait()     
@@ -333,16 +324,17 @@ class Env(gym.Wrapper):
         
         info["model_status"] = self.status
         self.counter += 1
-        return state, reward, done, info      
+        return state, reward, done, truncated_done, info      
 
-    def _write_send_model_buffer(self, state, reward, done, info, primary_action, action_prob):
+    def _write_send_model_buffer(self, state, reward, done, truncated_done, info, primary_action, action_prob):
         real_step_mask = (info["step_status"] == 0) | (info["step_status"] == 3)
+        reward = reward.unsqueeze(-1)
         data = {
                 "baseline": info["baseline"][real_step_mask],
                 "action": primary_action[real_step_mask],            
                 "reward": reward[real_step_mask],
                 "done": done[real_step_mask],
-                "truncated_done": info["truncated_done"][real_step_mask],
+                "truncated_done": truncated_done[real_step_mask],
                 "real_state": info["real_states_np"][real_step_mask.cpu().numpy()],
             }       
 
@@ -362,25 +354,6 @@ class Env(gym.Wrapper):
             data["real_state"] = data["real_state"][:, -self.frame_ch:]
         idx = np.arange(self.env_n)[real_step_mask.detach().cpu().numpy()]
         self.model_buffer.write.remote(ray.put(data), rank=self.rank, idx=idx, priority=None) 
-    
-    def to_raw_action(self, sampled_raw_action, action, action_prob):
-        B, M, D = sampled_raw_action.shape
-        assert M == self.sample_n
-        assert D == self.dim_actions
-
-        # Get the selected raw action for each batch instance
-        raw_action = sampled_raw_action[torch.arange(B, device=self.device), action] # shape (B, D)
-        if action_prob is not None:
-            # Compute the probability of selecting each raw action
-            raw_action_prob = torch.zeros(B, self.dim_actions, self.num_actions, device=self.device)
-            for n in range(self.num_actions):
-                mask = (sampled_raw_action == n).float()  # Create a mask where the raw action is n; shape (B, M, D)
-                # action_prob has shape (B, M)
-                # raw_action_prob has shape (B, D, N)
-                raw_action_prob[:, :, n] = torch.sum(mask * action_prob.unsqueeze(-1), dim=1)
-        else:
-            raw_action_prob = None
-        return raw_action, raw_action_prob
 
     def _refresh_wait(self):
         self._update_status()
@@ -434,27 +407,26 @@ class Env(gym.Wrapper):
     
     def decode_tree_reps(self, tree_reps):
         if self.flags.wrapper_type in [3, 4, 5]:
-            return self.env.decode_tree_reps(tree_reps)
+            return self.env.get_wrapper_attr('decode_tree_reps')(tree_reps)
         return util.decode_tree_reps(
             tree_reps=tree_reps,
-            num_actions=self.num_actions if not self.sample else self.sample_n,
+            num_actions=self.num_actions,
             dim_actions=self.dim_actions,
-            sample_n=self.flags.sample_n,
             rec_t=self.flags.rec_t,
             enc_type=self.flags.model_enc_type,
             f_type=self.flags.model_enc_f_type,
         )
     
     def get_tree_rep_meaning(self):
-        if not hasattr(self, "tree_rep_meaning") or self.tree_rep_meaning is None:
+        if self.tree_rep_meaning is None:
             if self.flags.wrapper_type in [3, 4, 5]:
-                self.tree_rep_meaning = self.env.tree_rep_meaning
+                self.tree_rep_meaning = self.env.get_wrapper_attr('tree_rep_meaning')
             elif self.flags.wrapper_type in [0, 2]:
-                self.tree_rep_meaning = util.slice_tree_reps(self.num_actions, self.dim_actions, self.flags.sample_n, self.flags.rec_t)        
+                self.tree_rep_meaning = util.slice_tree_reps(self.num_actions, self.dim_actions, self.flags.rec_t)        
         return self.tree_rep_meaning
     
     def save_ckp(self):
-        data = self.env.save_ckp()
+        data = self.env.get_wrapper_attr('save_ckp')()
         if len(data) > 0:
             np.savez(self.ckp_env_path, **data)
 
