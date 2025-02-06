@@ -291,6 +291,7 @@ class ConvAttnLSTM(nn.Module):
         for n, (x_single, reset_single) in enumerate(
             zip(x.unbind(), reset.unbind())
         ):
+            # print('reset_single', reset_single)
             for t in range(self.tran_t):
                 if t > 0:
                     reset_single = torch.zeros_like(reset_single)

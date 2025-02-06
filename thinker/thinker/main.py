@@ -220,6 +220,7 @@ class Env(gym.Wrapper):
             with np.load(self.ckp_env_path, allow_pickle=True) as data:
                 env.get_wrapper_attr('load_ckp')(data)                    
 
+        print('PostWrapper')
         env = wrapper.PostWrapper(env, self.flags) 
         self.tree_rep_meaning = None
 
@@ -287,7 +288,7 @@ class Env(gym.Wrapper):
         state = self.env.reset(self.model_net, seed=seed)
         return state
 
-    def step(self, primary_action, reset_action=None, action_prob=None, ignore=False):        
+    def step(self, primary_action, reset_action=None, action_prob=None, ignore=False):
 
         assert primary_action.shape == self.pri_action_shape, \
                     f"primary_action should have shape {self.pri_action_shape} not {primary_action.shape}"  
@@ -304,7 +305,9 @@ class Env(gym.Wrapper):
                     f"action_prob should have shape {self.action_prob_shape} not {action_prob.shape}"
         
         with torch.set_grad_enabled(False):
-            state, reward, done, truncated_done, info = self.env.step(action, self.model_net)  
+            state, reward, done, truncated_done, info = self.env.step(action, self.model_net)
+            # reward = reward + 0.05 * (action == 0).float()
+
         last_step_real = (info["step_status"] == 0) | (info["step_status"] == 3)
         if self.train_model and not ignore and torch.any(last_step_real): 
             self._write_send_model_buffer(state, reward, done, truncated_done, info, primary_action, action_prob)        

@@ -12,8 +12,9 @@ class DummyWrapper(gym.Wrapper):
     the only function is to convert returning var into tensor
     and reset the env when it is done.
     """
-    def __init__(self, env, env_n, flags, model_net, device=None, timing=False):   
+    def __init__(self, env, env_n, flags, model_net, device=None, timing=False):
         gym.Wrapper.__init__(self, env)
+        print('DummyWrapper')
         self.env_n = env_n
         self.flags = flags
         self.device = torch.device("cpu") if device is None else device 
@@ -55,7 +56,8 @@ class DummyWrapper(gym.Wrapper):
         if torch.is_tensor(action):
             action = action.detach().cpu().numpy()        
 
-        obs, reward, done, info = self.env.step(action) 
+        obs, reward, done, info = self.env.step(action)
+
         if np.any(done):
             done_idx = np.arange(self.env_n)[done]
             obs_reset = self.env.reset(idx=done_idx)
@@ -139,7 +141,7 @@ class PostWrapper(gym.Wrapper):
                 action = torch.clamp(action, self.action_space_low, self.action_space_high)
 
         state, reward, done, info = self.env.step(action, model_net)
-        real_done = info["real_done"]        
+        real_done = info["real_done"]
 
         for prefix in ["im", "cur"]:
             if prefix+"_reward" in info:
@@ -170,6 +172,16 @@ class PostWrapper(gym.Wrapper):
             x = (x.float() - self.norm_low) / (self.norm_high -  self.norm_low)
         return x
 
+# class RewardWrapper(gym.Wrapper):
+#     def step(self, action, **kwargs):
+#         print('RewardWrapper')
+#         observation, reward, done, info = self.env.step(action, **kwargs)
+#         if action == 0:
+#             print('action', action)
+#             reward += 0.01
+#         return observation, reward, done, info
+
+
 def PreWrapper(env, name, flags):
     grayscale = flags.grayscale
     discrete_k = flags.discrete_k 
@@ -177,7 +189,8 @@ def PreWrapper(env, name, flags):
     rand_action_eps = flags.rand_action_eps
     sokoban_pomdp = flags.sokoban_pomdp
     atari = flags.atari
-    
+
+    # env = RewardWrapper(env)
     if sokoban_pomdp: env = Sokoban_POMDP(env)
     if discrete_k > 0: env = DiscretizeActionWrapper(env, K=discrete_k)
     if repeat_action_n > 0: env = RepeatActionWrapper(env, repeat_action_n=repeat_action_n)      

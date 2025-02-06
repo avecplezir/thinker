@@ -967,12 +967,13 @@ class DRCNet(ActorBaseNet):
         super(DRCNet, self).__init__(obs_space, action_space, flags, tree_rep_meaning, record_state)
         assert flags.wrapper_type == 1
 
+        hidden_dim = 32
         self.encoder = nn.Sequential(
             nn.Conv2d(
                 in_channels=obs_space["real_states"].shape[1], out_channels=32, kernel_size=8, stride=4, padding=2
             ),
             nn.Conv2d(
-                in_channels=32, out_channels=32, kernel_size=4, stride=2, padding=1
+                in_channels=32, out_channels=hidden_dim, kernel_size=4, stride=2, padding=1
             ),
         )
         output_shape = lambda h, w, kernel, stride, padding: (
@@ -983,9 +984,10 @@ class DRCNet(ActorBaseNet):
         h, w = output_shape(self.real_states_shape[1], self.real_states_shape[2], 8, 4, 2)
         h, w = output_shape(h, w, 4, 2, 1)
 
+        print('flags.tran_t', flags.tran_t)
         self.core = ConvAttnLSTM(            
-            input_dim=32,
-            hidden_dim=32,
+            input_dim=hidden_dim,
+            hidden_dim=hidden_dim,
             num_layers=3,
             attn=False,
             h=h,
@@ -994,10 +996,10 @@ class DRCNet(ActorBaseNet):
             mem_n=None,            
             num_heads=8,            
             attn_mask_b=None,
-            tran_t=3,
+            tran_t=flags.tran_t,
             pool_inject=True,
         )
-        last_out_size = 32 * h * w * 2
+        last_out_size = hidden_dim * h * w * 2
         self.final_layer = nn.Linear(last_out_size, 256)
         self.policy = nn.Linear(256, self.num_actions * self.dim_actions)
         self.baseline = nn.Linear(256, 1)

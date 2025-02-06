@@ -247,7 +247,6 @@ class SActorLearner:
             return True
         
     def consume_data(self, data, timing=None):
-
         train_actor_out, initial_actor_state = data
         T, B, *_ = train_actor_out.episode_return.shape
         self.step += T * B
@@ -312,6 +311,8 @@ class SActorLearner:
     def consume_data_single(self, data, timing=None, first_iter=True, last_iter=False):
 
         train_actor_out, initial_actor_state = data
+        # print('train_actor_out', train_actor_out._fields)
+        # print('initial_actor_state', initial_actor_state._fields)
         actor_id = train_actor_out.id
         T, B = train_actor_out.done.shape
 
@@ -455,12 +456,14 @@ class SActorLearner:
 
         T, B = train_actor_out.done.shape
         T = T - 1        
-        
+
+
         if self.disable_thinker:
             clamp_action = train_actor_out.pri[1:]
         else:
             clamp_action = (train_actor_out.pri[1:], train_actor_out.reset[1:])
-        
+
+
         new_actor_out, _ = self.actor_net(
             train_actor_out, 
             initial_actor_state,
@@ -520,11 +523,16 @@ class SActorLearner:
             if self.flags.entropy_r_cost > 0. and prefix == "re":
                 prefix_rewards[last_step_real] += -self.flags.entropy_r_cost * train_actor_out.c_action_log_prob[last_step_real]
 
-            return_norm_type=self.flags.return_norm_type 
+            return_norm_type=self.flags.return_norm_type
             if not self.ppo_enable:
                 values = new_actor_out.baseline[:, :, i]
             else:
                 values = train_actor_out.baseline[:, :, i]
+
+            # print('values', values.shape)
+            # print('prefix_rewards', prefix_rewards.shape)
+            # print('clamp_action', clamp_action.shape)
+
             v_trace = compute_v_trace(
                 log_rhos=log_rhos,
                 discounts=discounts[i],

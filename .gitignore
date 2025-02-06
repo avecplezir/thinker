@@ -1,4 +1,8 @@
+.idea
+*__pycache__
+
 logs/
+slurm_scripts/
 data/
 past/
 tmp/
@@ -17,7 +21,6 @@ sokoban/gym_sokoban.egg-info
 sokoban/gym_sokoban/envs/csokoban.cpp
 sokoban/gym_sokoban/envs/boxoban-levels
 sokoban/gym_sokoban/envs/surface
-*__pycache__
 thinker/build
 thinker/wandb/
 thinker/thinker/cenv.cp39-win_amd64.pyd
