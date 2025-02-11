@@ -92,7 +92,7 @@ python train.py --mcts true --tree_carry false --rec_t 100 --actor_unroll_len 20
 
 - [DRC](https://proceedings.mlr.press/v97/guez19a/guez19a.pdf):
 ```bash
-python train.py --drc true --actor_unroll_len 20 --reg_cost 0.01 --actor_learning_rate 4e-4 --entropy_cost 1e-2 --v_trace_lamb 0.97 --actor_adam_eps 1e-4 --has_model false
+python train.py --drc true --actor_unroll_len 20 --reg_cost 0.01 --actor_learning_rate 4e-4 --entropy_cost 1e-2 --v_trace_lamb 0.97 --actor_adam_eps 1e-4 --has_model false --use_wandb
 ```
 
 Some common ablation includes:
