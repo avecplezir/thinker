@@ -531,7 +531,8 @@ class SActorLearner:
 
             # print('values', values.shape)
             # print('prefix_rewards', prefix_rewards.shape)
-            # print('clamp_action', clamp_action.shape)
+            # print('clamp_action', clamp_action)
+            # nops_actions = (clamp_action == 0).float()
 
             v_trace = compute_v_trace(
                 log_rhos=log_rhos,
@@ -552,6 +553,12 @@ class SActorLearner:
 
             if not self.ppo_enable:
                 adv = v_trace.pg_advantages.detach()
+                # print('nops_actions', nops_actions.shape)
+                # print('values', values.shape)
+                # print('values[:, 1:, i]', values[:, 1:, i].shape)
+                # thinking_adv = torch.relu(nops_actions[:, :-1, i] * 0.01 * (values[:, 1:] - values[:, :-1])).detach()
+                # print('thinking_adv', thinking_adv.shape)
+                # adv[:, :thinking_adv.shape[1]] = adv[:, :thinking_adv.shape[1]] + thinking_adv
                 pg_loss = -adv * new_actor_out.c_action_log_prob
             else:                
                 log_is = new_actor_out.c_action_log_prob - log_is_de

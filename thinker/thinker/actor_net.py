@@ -999,6 +999,7 @@ class DRCNet(ActorBaseNet):
             tran_t=flags.tran_t,
             pool_inject=True,
         )
+
         last_out_size = hidden_dim * h * w * 2
         self.final_layer = nn.Linear(last_out_size, 256)
         self.policy = nn.Linear(256, self.num_actions * self.dim_actions)
