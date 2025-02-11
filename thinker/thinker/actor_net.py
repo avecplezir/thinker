@@ -18,11 +18,13 @@ ActorOut = namedtuple(
         "reset_logits", # parameter for reset dist, i.e. logit
         "action", # tuple of the above two actions 
         "action_prob", # prob of primary action 
-        "c_action_log_prob", # log prob of chosen action
-        "baseline", # baseline 
+        "c_action_log_prob", # log prob of chosen action,
+        "baseline", # baseline
         "baseline_enc", # baseline encoding, only for non-scalar enc_type
         "entropy_loss", # entropy loss
         "reg_loss", # regularization loss
+        "pred_core_output", # predicted core output
+        "core_output", # core output
         "misc",
     ],
 )
@@ -972,6 +974,7 @@ class DRCNet(ActorBaseNet):
             nn.Conv2d(
                 in_channels=obs_space["real_states"].shape[1], out_channels=32, kernel_size=8, stride=4, padding=2
             ),
+            # nn.ReLU(),
             nn.Conv2d(
                 in_channels=32, out_channels=hidden_dim, kernel_size=4, stride=2, padding=1
             ),
@@ -1000,6 +1003,18 @@ class DRCNet(ActorBaseNet):
             pool_inject=True,
         )
 
+        if flags.use_predictor:
+            self.predictor = nn.Sequential(
+                nn.ReLU(),
+                nn.Conv2d(
+                    in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
+                ),
+                nn.ReLU(),
+                nn.Conv2d(
+                    in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
+                ),
+            )
+
         last_out_size = hidden_dim * h * w * 2
         self.final_layer = nn.Linear(last_out_size, 256)
         self.policy = nn.Linear(256, self.num_actions * self.dim_actions)
@@ -1022,9 +1037,15 @@ class DRCNet(ActorBaseNet):
         x = torch.flatten(x, 0, 1)
         x_enc = self.encoder(x)
         core_input = x_enc.view(*((T, B) + x_enc.shape[1:]))
-        core_output, core_state = self.core(core_input, done, core_state, record_state=self.record_state)
+        core_output_init, core_state = self.core(core_input, done, core_state, record_state=self.record_state)
+
+        if self.flags.use_predictor:
+            _, _, ch, w, h = core_output_init.shape
+            pred_core_output = self.predictor(core_output_init.view(T*B, ch, w, h))
+            pred_core_output = pred_core_output.view(T, B, ch, w, h)
+
         if self.record_state: self.hidden_state = self.core.hidden_state
-        core_output = torch.flatten(core_output, 0, 1)
+        core_output = torch.flatten(core_output_init, 0, 1)
         core_output = torch.cat([x_enc, core_output], dim=1)
         core_output = torch.flatten(core_output, 1)
         final_out = F.relu(self.final_layer(core_output))
@@ -1084,6 +1105,8 @@ class DRCNet(ActorBaseNet):
             baseline_enc=None,
             entropy_loss=entropy_loss,
             reg_loss=reg_loss,
+            pred_core_output=pred_core_output if self.flags.use_predictor else None,
+            core_output=core_output_init if self.flags.use_predictor else None,
             misc={},
         )
         return actor_out, core_state

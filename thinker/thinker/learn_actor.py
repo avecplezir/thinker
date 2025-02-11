@@ -53,6 +53,25 @@ def compute_baseline_enc_loss(
     if mask is not None: loss = loss * mask
     return torch.sum(loss)
 
+
+def simsiam_loss(p, z):
+    """
+    Computes the SimSiam similarity loss.
+
+    Args:
+        p (torch.Tensor): Predictor output tensor.
+        z (torch.Tensor): Target projection tensor (stop-gradient applied in SimSiam).
+
+    Returns:
+        torch.Tensor: The computed loss value.
+    """
+    z = z.detach()  # Stop gradient on the target network
+    p = F.normalize(p, dim=2)  # Normalize predictor output
+    z = F.normalize(z, dim=2)  # Normalize target projection
+
+    loss = -(p * z).sum(dim=1).mean()  # Negative cosine similarity
+    return loss
+
 class SActorLearner:
     def __init__(self, ray_obj, actor_param, flags, actor_net=None, device=None):
         self.flags = flags
@@ -472,8 +491,12 @@ class SActorLearner:
         if not self.ppo_enable:
             bootstrap_value = new_actor_out.baseline[-1]     
         else:
-            bootstrap_value = train_actor_out.baseline[-1]    
-    
+            bootstrap_value = train_actor_out.baseline[-1]
+
+        if self.flags.use_predictor:
+            if self.flags.predictor_loss_name == 'mse':
+                pred_core_output_loss = F.mse_loss(new_actor_out.pred_core_output[:-1], train_actor_out.core_output[1:].detach(), reduction='sum')
+
         # Move from obs[t] -> action[t] to action[t] -> obs[t].
         train_actor_out = util.tuple_map(train_actor_out, lambda x: x[1:])
         new_actor_out = util.tuple_map(new_actor_out, lambda x: x[:-1])
@@ -628,6 +651,11 @@ class SActorLearner:
         reg_loss = torch.sum(new_actor_out.reg_loss)        
         losses["reg_loss"] = reg_loss
         total_loss += self.flags.reg_cost * reg_loss
+
+        if self.flags.use_predictor:
+            # print('pred_core_output_loss', self.flags.predictor_cost * pred_core_output_loss)
+            # print('total_loss', total_loss)
+            total_loss += self.flags.predictor_cost * pred_core_output_loss
 
         if self.ppo_enable:
             if self.actor_net.discrete_action:
