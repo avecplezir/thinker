@@ -1017,11 +1017,10 @@ class DRCNet(ActorBaseNet):
                     ),
                 )
             elif flags.predictor_acchitecture == 'lstm':
-                self.predictor_num_layers = 3
                 self.predictor = ConvAttnLSTM(
                     input_dim=hidden_dim,
                     hidden_dim=hidden_dim,
-                    num_layers=self.predictor_num_layers,
+                    num_layers=self.flags.n_pred_layers,
                     attn=False,
                     h=h,
                     w=w,
@@ -1034,6 +1033,8 @@ class DRCNet(ActorBaseNet):
                 )
 
         last_out_size = hidden_dim * h * w * 2
+        if flags.use_prediction_for_actor:
+            last_out_size += hidden_dim * h * w
         self.final_layer = nn.Linear(last_out_size, 256)
         self.policy = nn.Linear(256, self.num_actions * self.dim_actions)
         self.baseline = nn.Linear(256, 1)
@@ -1073,8 +1074,15 @@ class DRCNet(ActorBaseNet):
 
         if self.record_state: self.hidden_state = self.core.hidden_state
         core_output = torch.flatten(core_output_init, 0, 1)
-        core_output = torch.cat([x_enc, core_output], dim=1)
+        if self.flags.use_prediction_for_actor:
+            pred_core_output = torch.flatten(pred_core_output, 0, 1)
+            core_output = torch.cat([x_enc, core_output, pred_core_output], dim=1)
+            # print('core_output pred', core_output.shape)
+        else:
+            core_output = torch.cat([x_enc, core_output], dim=1)
+            # print('core_output non pred', core_output.shape)
         core_output = torch.flatten(core_output, 1)
+        # print('core_output 2', core_output.shape)
         final_out = F.relu(self.final_layer(core_output))
 
         pri_logits = self.policy(final_out)

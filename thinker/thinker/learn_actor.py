@@ -655,7 +655,7 @@ class SActorLearner:
         total_loss += self.flags.reg_cost * reg_loss
 
         if self.flags.use_predictor:
-            print('pred_core_output_loss', self.flags.predictor_cost * pred_core_output_loss)
+            # print('pred_core_output_loss', self.flags.predictor_cost * pred_core_output_loss)
             # print('total_loss', total_loss)
             losses['pred_core_loss'] = pred_core_output_loss
             total_loss += self.flags.predictor_cost * pred_core_output_loss
