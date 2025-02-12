@@ -43,6 +43,7 @@ mcts: false # whether to use the mcts baseline
 use_predictor: false # whether to use the predictor baseline
 predictor_loss_name: 'mse'
 predictor_cost: 0.001
+predictor_acchitecture: 'simple'
 # -tree rep processing
 tree_rep_rnn: true # whether to use rnn in processing tree representation
 se_lstm_table: true # whether to use lstm to enablde tables

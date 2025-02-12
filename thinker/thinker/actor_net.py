@@ -988,10 +988,11 @@ class DRCNet(ActorBaseNet):
         h, w = output_shape(h, w, 4, 2, 1)
 
         print('flags.tran_t', flags.tran_t)
+        self.num_layers = 3
         self.core = ConvAttnLSTM(
             input_dim=hidden_dim,
             hidden_dim=hidden_dim,
-            num_layers=3,
+            num_layers=self.num_layers,
             attn=False,
             h=h,
             w=w,            
@@ -1004,16 +1005,33 @@ class DRCNet(ActorBaseNet):
         )
 
         if flags.use_predictor:
-            self.predictor = nn.Sequential(
-                nn.ReLU(),
-                nn.Conv2d(
-                    in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
-                ),
-                nn.ReLU(),
-                nn.Conv2d(
-                    in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
-                ),
-            )
+            if flags.predictor_acchitecture == 'simple':
+                self.predictor = nn.Sequential(
+                    nn.ReLU(),
+                    nn.Conv2d(
+                        in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
+                    ),
+                    nn.ReLU(),
+                    nn.Conv2d(
+                        in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
+                    ),
+                )
+            elif flags.predictor_acchitecture == 'lstm':
+                self.predictor_num_layers = 3
+                self.predictor = ConvAttnLSTM(
+                    input_dim=hidden_dim,
+                    hidden_dim=hidden_dim,
+                    num_layers=self.predictor_num_layers,
+                    attn=False,
+                    h=h,
+                    w=w,
+                    kernel_size=3,
+                    mem_n=None,
+                    num_heads=8,
+                    attn_mask_b=None,
+                    tran_t=flags.tran_t,
+                    pool_inject=True,
+                )
 
         last_out_size = hidden_dim * h * w * 2
         self.final_layer = nn.Linear(last_out_size, 256)
@@ -1025,7 +1043,10 @@ class DRCNet(ActorBaseNet):
             self.register_buffer("kl_beta", kl_beta)
 
     def initial_state(self, batch_size, device=None):
-        return self.core.initial_state(batch_size, device=device)
+        if self.flags.use_predictor and self.flags.predictor_acchitecture == 'lstm':
+            return self.core.initial_state(batch_size, device=device) + self.core.initial_state(batch_size, device=device)
+        else:
+            return self.core.initial_state(batch_size, device=device)
 
     def forward(self, env_out, core_state=(), clamp_action=None, compute_loss=False, greedy=False):
         done = env_out.done
@@ -1037,12 +1058,18 @@ class DRCNet(ActorBaseNet):
         x = torch.flatten(x, 0, 1)
         x_enc = self.encoder(x)
         core_input = x_enc.view(*((T, B) + x_enc.shape[1:]))
-        core_output_init, core_state = self.core(core_input, done, core_state, record_state=self.record_state)
+        core_output_init, _core_state = self.core(core_input, done, core_state[:2*self.num_layers], record_state=self.record_state)
 
         if self.flags.use_predictor:
-            _, _, ch, w, h = core_output_init.shape
-            pred_core_output = self.predictor(core_output_init.view(T*B, ch, w, h))
-            pred_core_output = pred_core_output.view(T, B, ch, w, h)
+            if self.flags.predictor_acchitecture == 'simple':
+                _, _, ch, w, h = core_output_init.shape
+                pred_core_output = self.predictor(core_output_init.view(T*B, ch, w, h))
+                pred_core_output = pred_core_output.view(T, B, ch, w, h)
+            elif self.flags.predictor_acchitecture == 'lstm':
+                pred_core_output, pred_core_state = self.predictor(core_output_init, done, core_state[2*self.num_layers:], record_state=self.record_state)
+                core_state = _core_state + pred_core_state
+        else:
+            core_state = _core_state
 
         if self.record_state: self.hidden_state = self.core.hidden_state
         core_output = torch.flatten(core_output_init, 0, 1)

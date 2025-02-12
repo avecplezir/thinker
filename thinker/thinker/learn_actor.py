@@ -69,7 +69,7 @@ def simsiam_loss(p, z):
     p = F.normalize(p, dim=2)  # Normalize predictor output
     z = F.normalize(z, dim=2)  # Normalize target projection
 
-    loss = -(p * z).sum(dim=1).mean()  # Negative cosine similarity
+    loss = -(p * z).sum(dim=2).mean()  # Negative cosine similarity
     return loss
 
 class SActorLearner:
@@ -496,6 +496,8 @@ class SActorLearner:
         if self.flags.use_predictor:
             if self.flags.predictor_loss_name == 'mse':
                 pred_core_output_loss = F.mse_loss(new_actor_out.pred_core_output[:-1], train_actor_out.core_output[1:].detach(), reduction='sum')
+            if self.flags.predictor_loss_name == 'simsiam':
+                pred_core_output_loss = simsiam_loss(new_actor_out.pred_core_output[:-1], train_actor_out.core_output[1:].detach())
 
         # Move from obs[t] -> action[t] to action[t] -> obs[t].
         train_actor_out = util.tuple_map(train_actor_out, lambda x: x[1:])
@@ -653,8 +655,9 @@ class SActorLearner:
         total_loss += self.flags.reg_cost * reg_loss
 
         if self.flags.use_predictor:
-            # print('pred_core_output_loss', self.flags.predictor_cost * pred_core_output_loss)
+            print('pred_core_output_loss', self.flags.predictor_cost * pred_core_output_loss)
             # print('total_loss', total_loss)
+            losses['pred_core_loss'] = pred_core_output_loss
             total_loss += self.flags.predictor_cost * pred_core_output_loss
 
         if self.ppo_enable:
