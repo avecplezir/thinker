@@ -284,7 +284,7 @@ class SelfPlayWorker:
         for field in TrainActorOut._fields:
             if log_only and field not in include_fields: continue
             v = getattr(self.actor_local_buffer, field)
-            if v is not None and field not in ["id"]:                
+            if v is not None and field not in ["id"]:
                 new_val = getattr(
                     env_out if field in EnvOut._fields else actor_out, field
                 )
@@ -296,7 +296,7 @@ class SelfPlayWorker:
                             # assume uniform step status
                             v[self.real_state_t] = new_val
                             self.real_state_t += 1
-                    else:                        
+                    else:
                         v[t] = new_val
                 else:
                     v.append(new_val)

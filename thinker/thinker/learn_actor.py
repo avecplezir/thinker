@@ -69,7 +69,7 @@ def simsiam_loss(p, z):
     p = F.normalize(p, dim=2)  # Normalize predictor output
     z = F.normalize(z, dim=2)  # Normalize target projection
 
-    loss = -(p * z).sum(dim=2).mean()  # Negative cosine similarity
+    loss = -(p * z).sum(dim=2).mean(-1).mean(-1) # Negative cosine similarity
     return loss
 
 class SActorLearner:
@@ -494,10 +494,20 @@ class SActorLearner:
             bootstrap_value = train_actor_out.baseline[-1]
 
         if self.flags.use_predictor:
+            if self.flags.modulate_predictor_by_advantages == 1:
+                adv = torch.abs(new_actor_out.baseline[1:] - train_actor_out.baseline[:-1])
+                adv = adv.detach()
+                adv = adv[:, :, 0]
+                # print('adv', adv.shape, adv)
+
             if self.flags.predictor_loss_name == 'mse':
                 pred_core_output_loss = F.mse_loss(new_actor_out.pred_core_output[:-1], train_actor_out.core_output[1:].detach(), reduction='sum')
             if self.flags.predictor_loss_name == 'simsiam':
                 pred_core_output_loss = simsiam_loss(new_actor_out.pred_core_output[:-1], train_actor_out.core_output[1:].detach())
+            if self.flags.modulate_predictor_by_advantages == 1:
+                pred_core_output_loss = (pred_core_output_loss * adv).mean()
+            else:
+                pred_core_output_loss = pred_core_output_loss.mean()
 
         # Move from obs[t] -> action[t] to action[t] -> obs[t].
         train_actor_out = util.tuple_map(train_actor_out, lambda x: x[1:])

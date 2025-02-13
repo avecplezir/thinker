@@ -1061,13 +1061,14 @@ class DRCNet(ActorBaseNet):
         core_input = x_enc.view(*((T, B) + x_enc.shape[1:]))
         core_output_init, _core_state = self.core(core_input, done, core_state[:2*self.num_layers], record_state=self.record_state)
 
+        core_output_input = core_output_init.detach() if self.flags.detach_core_for_predictor else core_output_init
         if self.flags.use_predictor:
             if self.flags.predictor_acchitecture == 'simple':
-                _, _, ch, w, h = core_output_init.shape
-                pred_core_output = self.predictor(core_output_init.view(T*B, ch, w, h))
-                pred_core_output = pred_core_output.view(T, B, ch, w, h)
+                _, _, ch, w, h = core_output_input.shape
+                pred_core_output = self.predictor(core_output_input.view(T*B, ch, w, h))
+                pred_core_output_init = pred_core_output.view(T, B, ch, w, h)
             elif self.flags.predictor_acchitecture == 'lstm':
-                pred_core_output, pred_core_state = self.predictor(core_output_init, done, core_state[2*self.num_layers:], record_state=self.record_state)
+                pred_core_output_init, pred_core_state = self.predictor(core_output_input, done, core_state[2*self.num_layers:], record_state=self.record_state)
                 core_state = _core_state + pred_core_state
         else:
             core_state = _core_state
@@ -1075,7 +1076,7 @@ class DRCNet(ActorBaseNet):
         if self.record_state: self.hidden_state = self.core.hidden_state
         core_output = torch.flatten(core_output_init, 0, 1)
         if self.flags.use_prediction_for_actor:
-            pred_core_output = torch.flatten(pred_core_output, 0, 1)
+            pred_core_output = torch.flatten(pred_core_output_init, 0, 1)
             core_output = torch.cat([x_enc, core_output, pred_core_output], dim=1)
             # print('core_output pred', core_output.shape)
         else:
@@ -1140,7 +1141,7 @@ class DRCNet(ActorBaseNet):
             baseline_enc=None,
             entropy_loss=entropy_loss,
             reg_loss=reg_loss,
-            pred_core_output=pred_core_output if self.flags.use_predictor else None,
+            pred_core_output=pred_core_output_init if self.flags.use_predictor else None,
             core_output=core_output_init if self.flags.use_predictor else None,
             misc={},
         )
