@@ -1059,33 +1059,41 @@ class DRCNet(ActorBaseNet):
         x = torch.flatten(x, 0, 1)
         x_enc = self.encoder(x)
         core_input = x_enc.view(*((T, B) + x_enc.shape[1:]))
-        core_output_init, _core_state = self.core(core_input, done, core_state[:2*self.num_layers], record_state=self.record_state)
 
-        core_output_input = core_output_init.detach() if self.flags.detach_core_for_predictor else core_output_init
-        if self.flags.use_predictor:
-            if self.flags.predictor_acchitecture == 'simple':
-                _, _, ch, w, h = core_output_input.shape
-                pred_core_output = self.predictor(core_output_input.view(T*B, ch, w, h))
-                pred_core_output_init = pred_core_output.view(T, B, ch, w, h)
-            elif self.flags.predictor_acchitecture == 'lstm':
-                pred_core_output_init, pred_core_state = self.predictor(core_output_input, done, core_state[2*self.num_layers:], record_state=self.record_state)
-                core_state = _core_state + pred_core_state
-        else:
-            core_state = _core_state
+        latent_baselines = []
+        for lstm_interation in range(2):
+            core_output_init, _core_state = self.core(core_input, done, core_state[:2*self.num_layers], record_state=self.record_state)
 
-        if self.record_state: self.hidden_state = self.core.hidden_state
-        core_output = torch.flatten(core_output_init, 0, 1)
-        if self.flags.use_prediction_for_actor:
-            pred_core_output = torch.flatten(pred_core_output_init, 0, 1)
-            core_output = torch.cat([x_enc, core_output, pred_core_output], dim=1)
-            # print('core_output pred', core_output.shape)
-        else:
+        # core_output_input = core_output_init.detach() if self.flags.detach_core_for_predictor else core_output_init
+        # if self.flags.use_predictor:
+        #     if self.flags.predictor_acchitecture == 'simple':
+        #         _, _, ch, w, h = core_output_input.shape
+        #         pred_core_output = self.predictor(core_output_input.view(T*B, ch, w, h))
+        #         pred_core_output_init = pred_core_output.view(T, B, ch, w, h)
+        #     elif self.flags.predictor_acchitecture == 'lstm':
+        #         pred_core_output_init, pred_core_state = self.predictor(core_output_input, done, core_state[2*self.num_layers:], record_state=self.record_state)
+        #         core_state = _core_state + pred_core_state
+        # else:
+        #     core_state = _core_state
+
+            if self.record_state: self.hidden_state = self.core.hidden_state
+            core_output = torch.flatten(core_output_init, 0, 1)
+
+            # if self.flags.use_prediction_for_actor:
+            #     pred_core_output = torch.flatten(pred_core_output_init, 0, 1)
+            #     core_output = torch.cat([x_enc, core_output, pred_core_output], dim=1)
+            #     # print('core_output pred', core_output.shape)
+            # else:
             core_output = torch.cat([x_enc, core_output], dim=1)
-            # print('core_output non pred', core_output.shape)
-        core_output = torch.flatten(core_output, 1)
-        # print('core_output 2', core_output.shape)
-        final_out = F.relu(self.final_layer(core_output))
+            core_output = torch.flatten(core_output, 1)
+            # print('core_output 2', core_output.shape)
+            final_out = F.relu(self.final_layer(core_output))
 
+            latent_baseline = self.baseline(final_out).view(T, B, 1)
+            latent_baselines.append(latent_baseline)
+
+        baseline = torch.stack(latent_baselines, dim=2)
+        print('baseline', baseline.shape)
         pri_logits = self.policy(final_out)
         pri_logits = pri_logits.view(T*B, self.dim_actions, self.num_actions)
 
@@ -1118,8 +1126,6 @@ class DRCNet(ActorBaseNet):
         action_prob = F.softmax(pri_logits, dim=-1)
         if not self.tuple_action: action_prob = action_prob[:, :, 0]    
 
-        baseline = self.baseline(final_out).view(T, B, 1)
-
         if compute_loss:
             reg_loss = (
                 1e-3 * torch.sum(torch.square(pri_logits), dim=(-2, -1))
@@ -1141,7 +1147,7 @@ class DRCNet(ActorBaseNet):
             baseline_enc=None,
             entropy_loss=entropy_loss,
             reg_loss=reg_loss,
-            pred_core_output=pred_core_output_init if self.flags.use_predictor else None,
+            pred_core_output= None,
             core_output=core_output_init if self.flags.use_predictor else None,
             misc={},
         )
