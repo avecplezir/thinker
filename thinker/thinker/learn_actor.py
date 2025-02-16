@@ -495,17 +495,17 @@ class SActorLearner:
 
         if self.flags.use_predictor:
             if self.flags.modulate_predictor_by_advantages == 1:
-                adv = torch.abs(new_actor_out.baseline[1:] - train_actor_out.baseline[:-1])
-                adv = adv.detach()
-                adv = adv[:, :, 0]
-                # print('adv', adv.shape, adv)
+                pred_adv = torch.abs(new_actor_out.baseline[1:] - train_actor_out.baseline[:-1])
+                pred_adv = pred_adv.detach()
+                pred_adv = pred_adv[:, :, 0]
+                pred_adv = 1 + torch.log(1 + pred_adv)
 
             if self.flags.predictor_loss_name == 'mse':
                 pred_core_output_loss = F.mse_loss(new_actor_out.pred_core_output[:-1], train_actor_out.core_output[1:].detach(), reduction='sum')
             if self.flags.predictor_loss_name == 'simsiam':
                 pred_core_output_loss = simsiam_loss(new_actor_out.pred_core_output[:-1], train_actor_out.core_output[1:].detach())
             if self.flags.modulate_predictor_by_advantages == 1:
-                pred_core_output_loss = (pred_core_output_loss * adv).mean()
+                pred_core_output_loss = (pred_core_output_loss * pred_adv).mean()
             else:
                 pred_core_output_loss = pred_core_output_loss.mean()
 
@@ -665,8 +665,6 @@ class SActorLearner:
         total_loss += self.flags.reg_cost * reg_loss
 
         if self.flags.use_predictor:
-            # print('pred_core_output_loss', self.flags.predictor_cost * pred_core_output_loss)
-            # print('total_loss', total_loss)
             losses['pred_core_loss'] = pred_core_output_loss
             total_loss += self.flags.predictor_cost * pred_core_output_loss
 
