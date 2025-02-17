@@ -1061,7 +1061,7 @@ class DRCNet(ActorBaseNet):
         core_input = x_enc.view(*((T, B) + x_enc.shape[1:]))
 
         latent_baselines = []
-        for lstm_interation in range(2):
+        for lstm_interation in range(3):
             core_output_init, _core_state = self.core(core_input, done, core_state[:2*self.num_layers], record_state=self.record_state)
 
         # core_output_input = core_output_init.detach() if self.flags.detach_core_for_predictor else core_output_init
@@ -1093,7 +1093,7 @@ class DRCNet(ActorBaseNet):
             latent_baselines.append(latent_baseline)
 
         baseline = torch.stack(latent_baselines, dim=2)
-        print('baseline', baseline.shape)
+        # print('baseline', baseline.shape)
         pri_logits = self.policy(final_out)
         pri_logits = pri_logits.view(T*B, self.dim_actions, self.num_actions)
 

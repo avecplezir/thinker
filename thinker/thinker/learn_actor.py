@@ -134,7 +134,8 @@ class SActorLearner:
         if self.flags.cur_cost > 0.:
             self.ret_buffers["cur"] = RetBuffer(max_actor_id, mean_n=400)
         self.ret_buffers["len"] = RetBuffer(max_actor_id, mean_n=400)
-        self.im_discounting = self.flags.discounting ** (1 / self.flags.rec_t)
+        print('rec_t', self.flags.rec_t)
+        self.im_discounting = self.flags.discounting ** (1 / 3)
 
         self.rewards_ls = ["re"]
         if flags.im_cost > 0.0:
@@ -487,55 +488,39 @@ class SActorLearner:
             compute_loss = True,
         )
 
+
         # Take final value function slice for bootstrapping.
         if not self.ppo_enable:
-            bootstrap_value = new_actor_out.baseline[-1]     
+            bootstrap_value = new_actor_out.baseline[-1, :, -1]
         else:
-            bootstrap_value = train_actor_out.baseline[-1]
-
-        if self.flags.use_predictor:
-            if self.flags.modulate_predictor_by_advantages == 1:
-                pred_adv = torch.abs(new_actor_out.baseline[1:] - train_actor_out.baseline[:-1])
-                pred_adv = pred_adv.detach()
-                pred_adv = pred_adv[:, :, 0]
-                pred_adv = 1 + torch.log(1 + pred_adv)
-
-            if self.flags.predictor_loss_name == 'mse':
-                pred_core_output_loss = F.mse_loss(new_actor_out.pred_core_output[:-1], train_actor_out.core_output[1:].detach(), reduction='sum')
-            if self.flags.predictor_loss_name == 'simsiam':
-                pred_core_output_loss = simsiam_loss(new_actor_out.pred_core_output[:-1], train_actor_out.core_output[1:].detach())
-            if self.flags.modulate_predictor_by_advantages == 1:
-                pred_core_output_loss = (pred_core_output_loss * pred_adv).mean()
-            else:
-                pred_core_output_loss = pred_core_output_loss.mean()
+            bootstrap_value = train_actor_out.baseline[-1, :, -1]
 
         # Move from obs[t] -> action[t] to action[t] -> obs[t].
         train_actor_out = util.tuple_map(train_actor_out, lambda x: x[1:])
         new_actor_out = util.tuple_map(new_actor_out, lambda x: x[:-1])
 
-        if self.ppo_enable:
-            # record base policy for ppo
-            base_actor_out = train_actor_out
-            if self.actor_net.discrete_action:
-                base_pri_logits = base_actor_out.pri_param.detach()
-            else:
-                pri_param = base_actor_out.pri_param.detach()
-                base_pri_mean = pri_param[:, :, :, 0]
-                base_pri_log_var = pri_param[:, :, :, 1]
-            if not self.disable_thinker:
-                base_reset_logits = base_actor_out.reset_logits.detach()
+        new_actor_out_baseline = new_actor_out.baseline.permute(0, 2, 1, 3).reshape(3*T, B, 1)
+        train_actor_out_baseline = train_actor_out.baseline.permute(0, 2, 1, 3).reshape(3*T, B, 1)
+
         rewards = train_actor_out.reward
+
+        def augment_w_zero(x):
+            return torch.cat([x, torch.zeros_like(x), torch.zeros_like(x)], dim=1).view(3*T, B)
+
+        rewards = augment_w_zero(rewards).unsqueeze(-1)
 
         # compute advantage and baseline        
         pg_losses = []
         baseline_losses = []
         done = train_actor_out.done | train_actor_out.truncated_done
+        done = augment_w_zero(done)
+
         discounts = [(~done).float() * self.im_discounting]
         masks = [None]
 
         last_step_real = (train_actor_out.step_status == 0) | (train_actor_out.step_status == 3)
         next_step_real = (train_actor_out.step_status == 2) | (train_actor_out.step_status == 3)        
-        
+
         if self.flags.im_cost > 0.:
             discounts.append((~next_step_real).float() * self.im_discounting)            
             masks.append((~last_step_real).float())
@@ -548,6 +533,8 @@ class SActorLearner:
         else:
             log_rhos = torch.zeros_like(train_actor_out.c_action_log_prob)
 
+        log_rhos = augment_w_zero(log_rhos)
+
         for i in range(self.num_rewards):
             prefix = self.rewards_ls[i]
             prefix_rewards = rewards[:, :, i]
@@ -555,11 +542,11 @@ class SActorLearner:
             if self.flags.entropy_r_cost > 0. and prefix == "re":
                 prefix_rewards[last_step_real] += -self.flags.entropy_r_cost * train_actor_out.c_action_log_prob[last_step_real]
 
-            return_norm_type=self.flags.return_norm_type 
+            return_norm_type=self.flags.return_norm_type
             if not self.ppo_enable:
-                values = new_actor_out.baseline[:, :, i]
+                values = new_actor_out_baseline[:, :, i]
             else:
-                values = train_actor_out.baseline[:, :, i]
+                values = train_actor_out_baseline[:, :, i]
             v_trace = compute_v_trace(
                 log_rhos=log_rhos,
                 discounts=discounts[i],
@@ -579,6 +566,7 @@ class SActorLearner:
 
             if not self.ppo_enable:
                 adv = v_trace.pg_advantages.detach()
+                adv = adv[2::3]
                 pg_loss = -adv * new_actor_out.c_action_log_prob
             else:                
                 log_is = new_actor_out.c_action_log_prob - log_is_de
@@ -594,7 +582,7 @@ class SActorLearner:
             pg_losses.append(pg_loss)
             if self.flags.critic_enc_type == 0:
                 baseline_loss = compute_baseline_loss(
-                    baseline=new_actor_out.baseline[:, :, i],
+                    baseline=new_actor_out_baseline[:, :, i],
                     target_baseline=vs,
                     mask=masks[i]
                 )
