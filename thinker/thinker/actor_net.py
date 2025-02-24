@@ -272,6 +272,7 @@ class ActorBaseNet(nn.Module):
         self.num_rewards = 1
         self.num_rewards += int(flags.im_cost > 0.0)
         self.num_rewards += int(flags.cur_cost > 0.0)
+        self.num_rewards += int(flags.im2_cost > 0.0)
         self.enc_type = flags.critic_enc_type  
         self.rv_tran = None
         self.critic_zero_init = flags.critic_zero_init     

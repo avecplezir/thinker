@@ -451,6 +451,239 @@ class SActorLearner:
         r = self.real_step > self.flags.total_steps
         return r
 
+    def compute_losses_imagination(self, train_actor_out, initial_actor_state, first_iter=True, last_iter=False):
+        # compute loss and then discard the first step in train_actor_out
+
+        T, B = train_actor_out.done.shape
+        T = T - 1
+
+        if self.disable_thinker:
+            clamp_action = train_actor_out.pri[1:]
+        else:
+            clamp_action = (train_actor_out.pri[1:], train_actor_out.reset[1:])
+
+        new_actor_out, _ = self.actor_net(
+            train_actor_out,
+            initial_actor_state,
+            clamp_action=clamp_action,
+            compute_loss=True,
+        )
+
+        # Take final value function slice for bootstrapping.
+        if not self.ppo_enable:
+            bootstrap_value = new_actor_out.baseline[-1]
+        else:
+            bootstrap_value = train_actor_out.baseline[-1]
+
+            # Move from obs[t] -> action[t] to action[t] -> obs[t].
+        train_actor_out = util.tuple_map(train_actor_out, lambda x: x[1:])
+        new_actor_out = util.tuple_map(new_actor_out, lambda x: x[:-1])
+
+        if self.ppo_enable:
+            # record base policy for ppo
+            base_actor_out = train_actor_out
+            if self.actor_net.discrete_action:
+                base_pri_logits = base_actor_out.pri_param.detach()
+            else:
+                pri_param = base_actor_out.pri_param.detach()
+                base_pri_mean = pri_param[:, :, :, 0]
+                base_pri_log_var = pri_param[:, :, :, 1]
+            if not self.disable_thinker:
+                base_reset_logits = base_actor_out.reset_logits.detach()
+        rewards = train_actor_out.reward
+
+        # compute advantage and baseline
+        pg_losses = []
+        baseline_losses = []
+        done = train_actor_out.done | train_actor_out.truncated_done
+        discounts = [(~done).float() * self.im_discounting]
+        masks = [None]
+
+        last_step_real = (train_actor_out.step_status == 0) | (train_actor_out.step_status == 3)
+        next_step_real = (train_actor_out.step_status == 2) | (train_actor_out.step_status == 3)
+
+        if self.flags.im_cost > 0.:
+            discounts.append((~next_step_real).float() * self.im_discounting)
+            masks.append((~last_step_real).float())
+        if self.flags.cur_cost > 0.:
+            discounts.append((~done).float() * self.im_discounting)
+            masks.append(None)
+
+        if not self.ppo_enable or self.flags.ppo_v_trace:
+            log_rhos = new_actor_out.c_action_log_prob - train_actor_out.c_action_log_prob
+        else:
+            log_rhos = torch.zeros_like(train_actor_out.c_action_log_prob)
+
+        for i in range(self.num_rewards):
+            prefix = self.rewards_ls[i]
+            prefix_rewards = rewards[:, :, i]
+
+            if self.flags.entropy_r_cost > 0. and prefix == "re":
+                prefix_rewards[last_step_real] += -self.flags.entropy_r_cost * train_actor_out.c_action_log_prob[
+                    last_step_real]
+
+            return_norm_type = self.flags.return_norm_type
+            if not self.ppo_enable:
+                values = new_actor_out.baseline[:, :, i]
+            else:
+                values = train_actor_out.baseline[:, :, i]
+
+            # print('values', values.shape)
+            # print('prefix_rewards', prefix_rewards.shape)
+            # print('clamp_action', clamp_action)
+            # nops_actions = (clamp_action == 0).float()
+
+            v_trace = compute_v_trace(
+                log_rhos=log_rhos,
+                discounts=discounts[i],
+                rewards=prefix_rewards,
+                values=values,
+                bootstrap_value=bootstrap_value[:, i],
+                return_norm_type=return_norm_type,
+                norm_stat=self.norm_stats[i],
+                lamb=self.flags.v_trace_lamb,
+            )
+            self.norm_stats[i] = v_trace.norm_stat
+            if self.ppo_enable:
+                log_is_de = train_actor_out.c_action_log_prob
+                adv = v_trace.pg_advantages_nois.detach()
+                log_is_de = log_is_de.detach()
+                vs = v_trace.vs.detach()
+
+            if not self.ppo_enable:
+                adv = v_trace.pg_advantages.detach()
+                # print('nops_actions', nops_actions.shape)
+                # print('values', values.shape)
+                # print('values[:, 1:, i]', values[:, 1:, i].shape)
+                # thinking_adv = torch.relu(nops_actions[:, :-1, i] * 0.01 * (values[:, 1:] - values[:, :-1])).detach()
+                # print('thinking_adv', thinking_adv.shape)
+                # adv[:, :thinking_adv.shape[1]] = adv[:, :thinking_adv.shape[1]] + thinking_adv
+                pg_loss = -adv * new_actor_out.c_action_log_prob
+            else:
+                log_is = new_actor_out.c_action_log_prob - log_is_de
+                unclipped_is = torch.exp(log_is)
+                self.ppo_is_abs.append(torch.mean(torch.abs(unclipped_is - 1)).detach().item())
+                clipped_is = torch.clamp(unclipped_is, 1 - self.flags.ppo_clip, 1 + self.flags.ppo_clip)
+                pg_loss = -torch.minimum(unclipped_is * adv, clipped_is * adv)
+
+            if masks[i] is not None: pg_loss = pg_loss * masks[i]
+            pg_loss = torch.sum(pg_loss)
+
+            vs = v_trace.vs if not self.ppo_enable else vs
+            pg_losses.append(pg_loss)
+            if self.flags.critic_enc_type == 0:
+                baseline_loss = compute_baseline_loss(
+                    baseline=new_actor_out.baseline[:, :, i],
+                    target_baseline=vs,
+                    mask=masks[i]
+                )
+            else:
+                baseline_loss = compute_baseline_enc_loss(
+                    baseline_enc=new_actor_out.baseline_enc[:, :, i],
+                    target_baseline=vs,
+                    rv_tran=self.actor_net.rv_tran,
+                    enc_type=self.flags.critic_enc_type,
+                    mask=masks[i]
+                )
+
+            baseline_losses.append(baseline_loss)
+
+        # sum all the losses
+        total_loss = pg_losses[0] / self.actor_net.dim_actions
+        total_loss += self.flags.baseline_cost * baseline_losses[0]
+
+        losses = {
+            "pg_loss": pg_losses[0],
+            "baseline_loss": baseline_losses[0]
+        }
+        n = 0
+        for prefix in ["im", "cur"]:
+            cost = getattr(self.flags, "%s_cost" % prefix)
+            if cost > 0.:
+                n += 1
+                if getattr(self.flags, "%s_cost_anneal" % prefix):
+                    cost *= self.anneal_c
+                total_loss += cost * pg_losses[n] / self.actor_net.dim_actions
+                total_loss += (cost * self.flags.baseline_cost *
+                               baseline_losses[n])
+                losses["%s_pg_loss" % prefix] = pg_losses[n]
+                losses["%s_baseline_loss" % prefix] = baseline_losses[n]
+
+        # process entropy loss
+        if not self.autotune:
+            entropy_cost = self.flags.entropy_cost
+            im_entropy_cost = self.flags.im_entropy_cost
+        else:
+            entropy_cost = self.actor_net.log_entropy_cost.exp().item()
+            im_entropy_cost = self.actor_net.log_im_entropy_cost.exp().item()
+
+        f_entropy_loss = new_actor_out.entropy_loss
+        entropy_loss = f_entropy_loss * last_step_real.float()
+        policy_entropy = -entropy_loss.sum() / last_step_real.sum()
+        entropy_loss = torch.sum(entropy_loss)
+        losses["entropy_loss"] = entropy_loss
+        total_loss += entropy_cost * entropy_loss / self.actor_net.dim_actions
+
+        if not self.disable_thinker:
+            im_entropy_loss = f_entropy_loss * (~last_step_real).float()
+            im_policy_entropy = -im_entropy_loss.sum() / (~last_step_real).sum()
+            im_entropy_loss = torch.sum(im_entropy_loss)
+            total_loss += im_entropy_cost * im_entropy_loss
+            losses["im_entropy_loss"] = im_entropy_loss / self.actor_net.dim_actions
+
+        if self.autotune:
+            autotune_loss = -self.actor_net.log_entropy_cost.exp() * (self.tar_entropy - policy_entropy.detach())
+            if not self.disable_thinker:
+                autotune_loss += -self.actor_net.log_im_entropy_cost.exp() * (
+                            self.tar_im_entropy - im_policy_entropy.detach())
+            autotune_loss = autotune_loss[0]
+            losses["autotune_loss"] = autotune_loss
+            total_loss += autotune_loss
+
+        reg_loss = torch.sum(new_actor_out.reg_loss)
+        losses["reg_loss"] = reg_loss
+        total_loss += self.flags.reg_cost * reg_loss
+
+        if self.ppo_enable:
+            if self.actor_net.discrete_action:
+                tar_pri_log_prob = F.log_softmax(base_pri_logits, dim=-1)
+                pri_log_prob = F.log_softmax(new_actor_out.pri_param, dim=-1)
+                pri_kl_loss = F.kl_div(pri_log_prob, tar_pri_log_prob, reduction="none", log_target=True)
+                pri_kl_loss = torch.sum(pri_kl_loss, dim=-1)
+            else:
+                pri_kl_loss = guassian_kl_div(
+                    base_pri_mean,
+                    base_pri_log_var,
+                    new_actor_out.pri_param[:, :, :, 0],
+                    new_actor_out.pri_param[:, :, :, 1]
+                )
+            pri_kl_loss = torch.sum(pri_kl_loss)
+            kl_loss = pri_kl_loss
+
+            if not self.disable_thinker:
+                tar_reset_log_prob = F.log_softmax(base_reset_logits, dim=-1)
+                reset_log_prob = F.log_softmax(new_actor_out.reset_logits, dim=-1)
+                reset_kl_loss = F.kl_div(reset_log_prob, tar_reset_log_prob, reduction="sum", log_target=True)
+                kl_loss += reset_kl_loss
+
+            if self.flags.ppo_kl_coef > 0.:
+                total_loss += self.flags.ppo_kl_coef * self.actor_net.kl_beta * kl_loss
+                avg_kl_loss = kl_loss / T / B
+                if last_iter:
+                    if avg_kl_loss < self.flags.ppo_kl_targ / 1.5:
+                        self.actor_net.kl_beta /= 2
+                    elif avg_kl_loss > self.flags.ppo_kl_targ * 1.5:
+                        self.actor_net.kl_beta *= 2
+                if self.flags.ppo_early_stop:
+                    if avg_kl_loss > self.flags.ppo_kl_targ:
+                        self.ppo_early_stop = True
+                self.actor_net.kl_beta = torch.clamp(self.actor_net.kl_beta, 1e-6, 1e3)
+            self.kl_losses.append(kl_loss.item())
+            losses["kl_loss"] = np.mean(self.kl_losses)
+        losses["total_loss"] = total_loss
+
+        return losses, train_actor_out
+
     def compute_losses(self, train_actor_out, initial_actor_state, first_iter=True, last_iter=False):
         # compute loss and then discard the first step in train_actor_out
 

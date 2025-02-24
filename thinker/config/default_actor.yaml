@@ -20,6 +20,7 @@ v_trace_lamb: 1. # lambda used in v-trace
 # cost setting
 im_cost: 1. # cost for imaginary rewards
 im_cost_anneal: true # whether to anneal the imaginary cost to 0
+im2_cost: 0. # cost for second imaginary rewards
 cur_cost: 0. # cost for curiosity rewards - unused
 cur_cost_anneal: true # whether to anneal the curiosity cost to 0
 baseline_cost: 0.5 # cost for computing baseline
