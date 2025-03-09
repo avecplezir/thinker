@@ -130,8 +130,19 @@ class SelfPlayWorker:
             start_time = timer()
 
             self.actor_net.train(False)
+
+            learn_online = False
+            learn_offline = False
+
             while True:
-          
+
+                if n % 100 == 0:
+                    learn_online = not learn_online
+                    learn_imagination = not learn_online
+                    self.actor_net.learn_online = learn_online
+                    self.actor_net.learn_imagination = learn_imagination
+                    self.actor_net.learn_offline = learn_offline
+
                 if self.time: self.timing.reset()
                 # prepare train_actor_out data to be written
                 initial_actor_state = actor_state

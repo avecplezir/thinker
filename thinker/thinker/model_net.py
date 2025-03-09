@@ -10,7 +10,7 @@ import math
 OutNetOut = namedtuple(
     "OutNetOut",
     [
-        "rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits", "policy"
+        "rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits", "policy", "dream_vs", "dream_policy"
     ],
 )
 SRNetOut = namedtuple(
@@ -428,6 +428,7 @@ class OutputNet(nn.Module):
         predict_r=True,
         predict_done=False,
         ordinal=False,
+        dreaming_policy=False,
     ):
         super(OutputNet, self).__init__()
 
@@ -442,7 +443,8 @@ class OutputNet(nn.Module):
         self.predict_v_pi = predict_v_pi
         self.predict_r = predict_r
         self.predict_done = predict_done  
-        self.ordinal = ordinal      
+        self.ordinal = ordinal
+        self.dreaming_policy = dreaming_policy
 
         assert self.enc_type in [0, 2, 3], "model encoding type can only be 0, 2, 3"
 
@@ -492,6 +494,30 @@ class OutputNet(nn.Module):
             ordinal_mask = ordinal_mask.float()
             self.register_buffer("ordinal_mask", ordinal_mask)
 
+        if self.dreaming_policy:
+            self.dream_fc_logits = nn.Linear(fc_in, self.dim_actions*(self.num_actions if self.discrete_action else 2))
+            self.dream_fc_v = nn.Linear(fc_in, out_n)
+            if zero_init:
+                nn.init.constant_(self.fc_v.weight, 0.0)
+                nn.init.constant_(self.fc_v.bias, 0.0)
+                nn.init.constant_(self.fc_logits.weight, 0.0)
+                nn.init.constant_(self.fc_logits.bias, 0.0)
+
+            # self.dreaming_policy = MLP(
+            #     input_size=self.hidden_shape[0],
+            #     layer_sizes=[self.hidden_shape[0] // 2, self.hidden_shape[0] // 4],
+            #     output_size=self.dim_actions,
+            #     output_activation=nn.Identity,
+            #     norm=False
+            # )
+            # self.dreaming_critic = MLP(
+            #     input_size=self.hidden_shape[0],
+            #     layer_sizes=[self.hidden_shape[0] // 2, self.hidden_shape[0] // 4],
+            #     output_size=1,
+            #     output_activation=nn.Identity,
+            #     norm=False
+            # )
+
     def forward(self, h, predict_reward=True):
         x = h
         b = x.shape[0]
@@ -536,6 +562,13 @@ class OutputNet(nn.Module):
                 r = r_out
         else:
             r, r_enc_logit = None, None
+
+        if self.dreaming_policy:
+            dream_policy = self._compute_policy(self.dream_fc_logits, x_policy)
+            dream_v = self.dream_fc_v(x_v)
+        else:
+            dream_policy, dream_v = None, None
+
         out = OutNetOut(
             rs=r,
             r_enc_logits=r_enc_logit,
@@ -544,6 +577,8 @@ class OutputNet(nn.Module):
             vs=v,
             v_enc_logits=v_enc_logit,
             policy=policy,
+            dream_vs=dream_v,
+            dream_policy=dream_policy,
         )
         return out
     
@@ -620,6 +655,7 @@ class SRNet(nn.Module):
             predict_r=True,
             predict_done=self.flags.model_done_loss_cost > 0.0,
             ordinal=self.flags.model_ordinal,
+            dreaming_policy=self.flags.dreaming_policy,
         )
         self.rv_tran = self.out.rv_tran
 

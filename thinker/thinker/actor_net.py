@@ -256,6 +256,12 @@ class ActorBaseNet(nn.Module):
     # base class for all actor network
     def __init__(self, obs_space, action_space, flags, tree_rep_meaning=False, record_state=False):
         super(ActorBaseNet, self).__init__()
+
+        # define in the training loop to learn in diffrent regims different part of the network
+        self.learn_online = None
+        self.learn_offline = None
+        self.learn_imagination = None
+
         self.disable_thinker = flags.wrapper_type == 1
         self.record_state = record_state        
 
@@ -290,7 +296,7 @@ class ActorBaseNet(nn.Module):
         # state space processing
         self.see_tree_rep = flags.see_tree_rep and not self.disable_thinker
         if self.see_tree_rep:
-            self.tree_reps_shape = obs_space["tree_reps"].shape[1:]   
+            self.tree_reps_shape = obs_space["tree_reps"].shape[1:]
 
         self.see_h = flags.see_h and not self.disable_thinker
         if self.see_h:
@@ -359,7 +365,7 @@ class ActorNetSep(ActorBaseNet):
         critic_state = self.critic.initial_state(batch_size, device)
         self.state_idx = len(actor_state)
         return actor_state + critic_state
-    
+
     def forward(self, env_out, core_state=(), clamp_action=None, compute_loss=False, greedy=False):
         actor_state = core_state[:self.state_idx]
         critic_state = core_state[self.state_idx:]
@@ -373,7 +379,7 @@ class ActorNetSep(ActorBaseNet):
             reset_logits=actor_out.reset_logits,
             action=actor_out.action,
             action_prob=actor_out.action_prob,
-            c_action_log_prob=actor_out.c_action_log_prob,            
+            c_action_log_prob=actor_out.c_action_log_prob,
             baseline=critic_out.baseline,
             baseline_enc=critic_out.baseline_enc,
             entropy_loss=actor_out.entropy_loss,
@@ -385,8 +391,8 @@ class ActorNetSep(ActorBaseNet):
 
 class ActorNetSingle(ActorBaseNet):
     def __init__(self, obs_space, action_space, flags, tree_rep_meaning=None, record_state=False, actor=True, critic=True):
-        super(ActorNetSingle, self).__init__(obs_space, action_space, flags, tree_rep_meaning, record_state)      
-                  
+        super(ActorNetSingle, self).__init__(obs_space, action_space, flags, tree_rep_meaning, record_state)
+
         self.actor = actor
         self.critic = critic
 
@@ -394,19 +400,19 @@ class ActorNetSingle(ActorBaseNet):
             min_log_var = 2 * torch.log(torch.tensor(flags.actor_min_std))
             max_log_var = 2 * torch.log(torch.tensor(flags.actor_max_std))
             self.register_buffer("min_log_var", min_log_var)
-            self.register_buffer("max_log_var", max_log_var)   
+            self.register_buffer("max_log_var", max_log_var)
 
-        self.tran_dim = flags.tran_dim 
+        self.tran_dim = flags.tran_dim
         self.tran_reset_mode = flags.tran_reset_mode
-        self.tree_rep_rnn = flags.tree_rep_rnn and flags.see_tree_rep         
+        self.tree_rep_rnn = flags.tree_rep_rnn and flags.see_tree_rep
         self.se_lstm_table = getattr(flags, "se_lstm_table", False) and flags.see_tree_rep and flags.wrapper_type in [3, 4]
-        self.x_rnn = flags.x_rnn and flags.see_x  
+        self.x_rnn = flags.x_rnn and flags.see_x
         self.h_rnn = flags.h_rnn and flags.see_h
-        self.real_state_rnn = flags.real_state_rnn and flags.see_real_state         
+        self.real_state_rnn = flags.real_state_rnn and flags.see_real_state
 
         self.sep_im_head = flags.sep_im_head
         self.last_layer_n = flags.last_layer_n
-          
+
         # encoder for state or encoding output
         last_out_size = self.dim_rep_actions + self.num_rewards
 
@@ -414,10 +420,10 @@ class ActorNetSingle(ActorBaseNet):
             last_out_size += 2
 
         if self.see_h:
-            FrameEncoder = AFrameEncoder 
+            FrameEncoder = AFrameEncoder
             self.h_encoder = FrameEncoder(
-                input_shape=self.hs_shape,                    
-                flags=flags,                      
+                input_shape=self.hs_shape,
+                flags=flags,
             )
             h_out_size = self.h_encoder.out_size
             if self.h_rnn:
@@ -426,13 +432,13 @@ class ActorNetSingle(ActorBaseNet):
                     in_size=rnn_in_size,
                     flags=flags,
                 )
-                h_out_size = flags.tran_dim            
-            last_out_size += h_out_size   
-        
+                h_out_size = flags.tran_dim
+            last_out_size += h_out_size
+
         if self.see_x:
-            FrameEncoder = AFrameEncoder 
+            FrameEncoder = AFrameEncoder
             self.x_encoder_pre = FrameEncoder(
-                input_shape=self.xs_shape,                 
+                input_shape=self.xs_shape,
                 flags=flags,
                 downpool=True,
                 firstpool=True,
@@ -444,21 +450,21 @@ class ActorNetSingle(ActorBaseNet):
                     in_size=rnn_in_size,
                     flags=flags,
                 )
-                x_out_size = flags.tran_dim            
-            last_out_size += x_out_size           
+                x_out_size = flags.tran_dim
+            last_out_size += x_out_size
 
         if self.see_real_state:
             self.real_state_ch = getattr(flags, "real_state_ch", -1)
             if self.real_state_ch > 0:
                 self.real_states_shape = list(self.real_states_shape)
                 self.real_states_shape[0] = int(self.real_state_ch)
-                self.real_states_shape = tuple(self.real_states_shape)            
+                self.real_states_shape = tuple(self.real_states_shape)
             self.real_state_encoder =  AFrameEncoder(
-                input_shape=self.real_states_shape,                 
+                input_shape=self.real_states_shape,
                 flags=flags,
                 downpool=True,
                 firstpool=True,
-            )                        
+            )
             r_out_size = self.real_state_encoder.out_size
             self.pre_r_shape = (r_out_size,)
             if self.real_state_rnn:
@@ -467,25 +473,25 @@ class ActorNetSingle(ActorBaseNet):
                     in_size=rnn_in_size,
                     flags=flags,
                 )
-                r_out_size = flags.tran_dim   
+                r_out_size = flags.tran_dim
             self.post_r_shape = (r_out_size,)
-            last_out_size += r_out_size       
+            last_out_size += r_out_size
 
-        if self.see_tree_rep:            
+        if self.see_tree_rep:
             self.tree_rep_meaning = tree_rep_meaning
             in_size = self.tree_reps_shape[0]
             if self.se_lstm_table:
-                assert flags.se_query_cur == 2                
+                assert flags.se_query_cur == 2
                 root_table_mask = torch.zeros(in_size, dtype=torch.bool)
                 root_query_keys = [k for k in tree_rep_meaning if k.startswith("root_query")]
                 for i in root_query_keys:
-                    root_table_mask[self.tree_rep_meaning[i]] = 1        
-                # print("root_query_size: ", sum(root_table_mask).long().item())        
+                    root_table_mask[self.tree_rep_meaning[i]] = 1
+                # print("root_query_size: ", sum(root_table_mask).long().item())
                 cur_table_mask = torch.zeros(in_size, dtype=torch.bool)
                 cur_query_keys = [k for k in tree_rep_meaning if k.startswith("cur_query")]
                 for i in cur_query_keys:
                     cur_table_mask[self.tree_rep_meaning[i]] = 1
-                # print("cur_query_size: ", sum(cur_table_mask).long().item())        
+                # print("cur_query_size: ", sum(cur_table_mask).long().item())
                 non_table_mask = torch.logical_or(root_table_mask, cur_table_mask)
                 non_table_mask = torch.logical_not(non_table_mask)
                 self.register_buffer("root_table_mask", root_table_mask)
@@ -493,7 +499,7 @@ class ActorNetSingle(ActorBaseNet):
                 self.register_buffer("non_table_mask", non_table_mask)
                 input_size = (sum(root_table_mask) / flags.se_query_size).long().item()
                 self.tree_rep_table_lstm = nn.LSTM(input_size=input_size, hidden_size=64, num_layers=3, batch_first=True)
-                in_size = torch.sum(non_table_mask).long() + 64 * 2           
+                in_size = torch.sum(non_table_mask).long() + 64 * 2
 
             if self.tree_rep_rnn:
                 self.tree_rep_encoder = RNNEncoder(
@@ -509,7 +515,7 @@ class ActorNetSingle(ActorBaseNet):
                     norm=False,
                     skip_connection=True,
                 )
-                last_out_size += 100        
+                last_out_size += 100
 
         if self.last_layer_n > 0:
             self.final_mlp =  MLP(
@@ -534,7 +540,7 @@ class ActorNetSingle(ActorBaseNet):
                     self.im_policy = nn.Linear(last_out_size, self.num_actions * self.dim_actions)
                     if not self.discrete_action:
                         self.im_policy_lvar = nn.Linear(last_out_size, self.num_actions * self.dim_actions)
-                    
+
                 self.reset = nn.Linear(last_out_size, 2)
 
         if self.critic:
@@ -548,22 +554,22 @@ class ActorNetSingle(ActorBaseNet):
             elif self.enc_type == 1:
                 self.baseline = nn.Linear(last_out_size, self.num_rewards)
                 self.rv_tran = RVTran(enc_type=self.enc_type, enc_f_type=flags.critic_enc_f_type)
-            elif self.enc_type in [2, 3]:                        
+            elif self.enc_type in [2, 3]:
                 self.rv_tran = RVTran(enc_type=self.enc_type, enc_f_type=flags.critic_enc_f_type)
                 self.out_n = self.rv_tran.encoded_n
-                self.baseline = nn.Linear(last_out_size, self.num_rewards * self.out_n)            
+                self.baseline = nn.Linear(last_out_size, self.num_rewards * self.out_n)
 
             if self.critic_zero_init:
                 nn.init.constant_(self.baseline.weight, 0.0)
-                nn.init.constant_(self.baseline.bias, 0.0)                
+                nn.init.constant_(self.baseline.bias, 0.0)
 
-        self.initial_state(batch_size=1) # initialize self.state_idx        
+        self.initial_state(batch_size=1) # initialize self.state_idx
 
     def initial_state(self, batch_size, device=None):
         self.state_idx = {}
         idx = 0
         initial_state = ()
-        
+
         conditions = [self.x_rnn, self.real_state_rnn, self.tree_rep_rnn, self.h_rnn]
         rnn_names = ["x_encoder_rnn", "r_encoder_rnn", "tree_rep_encoder", "h_encoder_rnn"]
         state_names = ["x", "r", "tree_rep", "h"]
@@ -588,15 +594,15 @@ class ActorNetSingle(ActorBaseNet):
 
         self.state_len = idx
         return initial_state
-    
+
     def forward(self, env_out, core_state=(), clamp_action=None, compute_loss=False, greedy=False):
         """one-step forward for the actor;
         args:
             env_out (EnvOut):
                 tree_reps (tensor): tree_reps output with shape (T x B x C)
-                xs (tensor): optional - model predicted state with shape (T x B x C X H X W)                
-                hs (tensor): optional - hidden state with shape (T x B x C X H X W)                
-                real_states (tensor): optional - root's real state with shape (T x B x C X H X W)                
+                xs (tensor): optional - model predicted state with shape (T x B x C X H X W)
+                hs (tensor): optional - hidden state with shape (T x B x C X H X W)
+                real_states (tensor): optional - root's real state with shape (T x B x C X H X W)
                 done  (tensor): if episode ends with shape (T x B)
                 step_status (tensor): current step status with shape (T x B)
                 last_pri (tensor): last primiary action (non-one-hot) with shape (T x B)
@@ -609,8 +615,8 @@ class ActorNetSingle(ActorBaseNet):
             greedy (bool): whether to sample greedily
         return:
             ActorOut:
-                see definition of ActorOut; this is a tuple with elements of 
-                    shape (T x B x ...) except actor_out.action, which is a 
+                see definition of ActorOut; this is a tuple with elements of
+                    shape (T x B x ...) except actor_out.action, which is a
                     tuple of primiary and reset action, each with shape (B,),
                     selected on the last step
         """
@@ -631,10 +637,10 @@ class ActorNetSingle(ActorBaseNet):
             rnn_done = torch.zeros_like(env_out.done)
 
         final_out = []
-        
+
         last_pri = torch.flatten(env_out.last_pri, 0, 1)
         if not self.tuple_action: last_pri = last_pri.unsqueeze(-1)
-        last_pri = util.encode_action(last_pri, self.pri_action_space)   
+        last_pri = util.encode_action(last_pri, self.pri_action_space)
         final_out.append(last_pri)
 
         if not self.disable_thinker:
@@ -647,9 +653,9 @@ class ActorNetSingle(ActorBaseNet):
         last_reward = torch.clamp(torch.flatten(reward, 0, 1), -1, +1).float()
         final_out.append(last_reward)
 
-        if self.see_tree_rep:                
-            tree_rep = env_out.tree_reps               
-            tree_rep = torch.flatten(tree_rep, 0, 1)     
+        if self.see_tree_rep:
+            tree_rep = env_out.tree_reps
+            tree_rep = torch.flatten(tree_rep, 0, 1)
 
             if self.se_lstm_table:
                 root_table = tree_rep[:, self.root_table_mask]
@@ -670,10 +676,10 @@ class ActorNetSingle(ActorBaseNet):
             else:
                 encoded_tree_rep = self.tree_rep_encoder(tree_rep)
             final_out.append(encoded_tree_rep)
-        
+
         if self.see_h:
             hs = torch.flatten(env_out.hs, 0, 1)
-            encoded_h = self.h_encoder(hs)            
+            encoded_h = self.h_encoder(hs)
 
             if self.h_rnn:
                 core_state_ = core_state[self.state_idx['h']]
@@ -681,21 +687,21 @@ class ActorNetSingle(ActorBaseNet):
                     encoded_h, rnn_done, core_state_)
                 new_core_state[self.state_idx['h']] = core_state_
 
-            final_out.append(encoded_h)                
+            final_out.append(encoded_h)
 
         if self.see_x:
             xs = torch.flatten(env_out.xs, 0, 1)
-            with autocast(enabled=self.float16):                
+            with autocast(enabled=self.float16):
                 encoded_x = self.x_encoder_pre(xs)
             if self.float16: encoded_x = encoded_x.float()
-                
+
             if self.x_rnn:
                 encoded_x = torch.concat([encoded_x, last_pri, last_reset], dim=-1)
-                core_state_ = core_state[self.state_idx['x']]                
+                core_state_ = core_state[self.state_idx['x']]
                 encoded_x, core_state_ = self.x_encoder_rnn(
                     encoded_x, rnn_done, core_state_)
                 new_core_state[self.state_idx['x']] = core_state_
-            
+
             final_out.append(encoded_x)
 
         if self.see_real_state:
@@ -704,17 +710,17 @@ class ActorNetSingle(ActorBaseNet):
                 new_core_state[self.state_idx['r']] = core_state_
             new_core_state[self.state_idx['pre_encoded_real_state']] = (pre_encoded_real_state[-B:],)
             new_core_state[self.state_idx['encoded_real_state']] = (encoded_real_state[-B:],)
-            final_out.append(encoded_real_state)        
+            final_out.append(encoded_real_state)
 
-        final_out = torch.concat(final_out, dim=-1)   
+        final_out = torch.concat(final_out, dim=-1)
 
         if self.last_layer_n > 0:
-            final_out = self.final_mlp(final_out)     
+            final_out = self.final_mlp(final_out)
 
         misc = {}
         if self.actor:
             # compute logits
-            pri_logits = self.policy(final_out)    
+            pri_logits = self.policy(final_out)
             pri_logits = pri_logits.view(T*B, self.dim_actions, self.num_actions)
             if self.ordinal: pri_logits = self.ordinal_encode(pri_logits)
             if not self.discrete_action:
@@ -725,33 +731,33 @@ class ActorNetSingle(ActorBaseNet):
                 pri_log_var = torch.clamp(pri_log_var, self.min_log_var, self.max_log_var)
 
             if not self.disable_thinker:
-                im_logits = self.im_policy(final_out)                
+                im_logits = self.im_policy(final_out)
                 im_logits = im_logits.view(T*B, self.dim_actions, self.num_actions)
                 if self.ordinal: im_logits = self.ordinal_encode(im_logits)
-                if not self.discrete_action:                        
+                if not self.discrete_action:
                     im_mean = im_logits[:, :, 0]
-                    im_log_var = self.im_policy_lvar(final_out) 
-                if not self.discrete_action:                   
+                    im_log_var = self.im_policy_lvar(final_out)
+                if not self.discrete_action:
                     im_log_var = torch.clamp(im_log_var, self.min_log_var, self.max_log_var)
 
                 im_mask = env_out.step_status <= 1 # imagainary action will be taken next
                 if self.discrete_action:
                     im_mask = torch.flatten(im_mask, 0, 1).unsqueeze(-1).unsqueeze(-1)
                     pri_logits = torch.where(im_mask, im_logits, pri_logits)
-                else:                    
+                else:
                     im_mask = torch.flatten(im_mask, 0, 1).unsqueeze(-1)
                     pri_mean = torch.where(im_mask, im_mean, pri_mean)
                     pri_log_var = torch.where(im_mask, im_log_var, pri_log_var)
                 reset_logits = self.reset(final_out)
-            else:   
+            else:
                 reset_logits = None
 
             # compute entropy loss
             if compute_loss:
                 if self.discrete_action:
                     entropy_loss = -torch.nn.CrossEntropyLoss(reduction="none")(
-                        input=torch.flatten(pri_logits, 0, 1), 
-                        target=torch.flatten(F.softmax(pri_logits, dim=-1), 0, 1),                
+                        input=torch.flatten(pri_logits, 0, 1),
+                        target=torch.flatten(F.softmax(pri_logits, dim=-1), 0, 1),
                     )
                     entropy_loss = entropy_loss.view(T, B, self.dim_actions)
                     entropy_loss = torch.sum(entropy_loss, dim=-1)
@@ -762,7 +768,7 @@ class ActorNetSingle(ActorBaseNet):
                         input=reset_logits, target=F.softmax(reset_logits, dim=-1)
                     )
                     ent_reset_loss = ent_reset_loss.view(T, B) * (env_out.step_status <= 1).float()
-                    entropy_loss = entropy_loss + ent_reset_loss 
+                    entropy_loss = entropy_loss + ent_reset_loss
             else:
                 entropy_loss = None
 
@@ -770,15 +776,15 @@ class ActorNetSingle(ActorBaseNet):
             if self.discrete_action:
                 pri = sample(pri_logits, greedy=greedy, dim=-1)
                 pri_logits = pri_logits.view(T, B, self.dim_actions, self.num_actions)
-                pri = pri.view(T, B, self.dim_actions)        
+                pri = pri.view(T, B, self.dim_actions)
                 pri_param = pri_logits
             else:
                 pri_mean = pri_mean.view(T, B, self.dim_actions)
-                pri_log_var = pri_log_var.view(T, B, self.dim_actions)                
+                pri_log_var = pri_log_var.view(T, B, self.dim_actions)
                 pri_std = torch.exp(pri_log_var / 2)
                 pri_std = pri_std.view(T, B, self.dim_actions)
                 normal_dist = torch.distributions.Normal(pri_mean, pri_std)
-                if not greedy:                
+                if not greedy:
                     pri_pre_tanh = normal_dist.sample()
                 else:
                     pri_pre_tanh = pri_mean
@@ -791,7 +797,7 @@ class ActorNetSingle(ActorBaseNet):
             if not self.disable_thinker:
                 reset = sample(reset_logits, greedy=greedy, dim=-1)
                 reset_logits = reset_logits.view(T, B, 2)
-                reset = reset.view(T, B)    
+                reset = reset.view(T, B)
             else:
                 reset = None
 
@@ -802,39 +808,39 @@ class ActorNetSingle(ActorBaseNet):
                     reset[:clamp_action[1].shape[0]] = clamp_action[1]
                 else:
                     pri[:clamp_action.shape[0]] = clamp_action
-                if not self.discrete_action:  
-                    if self.tanh_action:              
+                if not self.discrete_action:
+                    if self.tanh_action:
                         pri_pre_tanh = atanh(pri)
                     else:
                         pri_pre_tanh = pri
 
             # compute chosen log porb
             if self.discrete_action:
-                c_action_log_prob = compute_discrete_log_prob(pri_logits, pri)     
+                c_action_log_prob = compute_discrete_log_prob(pri_logits, pri)
             else:
                 c_action_log_prob = normal_dist.log_prob(pri_pre_tanh)
-                if self.tanh_action:    
+                if self.tanh_action:
                     c_action_log_prob = c_action_log_prob - torch.log(1.0 - pri ** 2 + 1e-6)
-                c_action_log_prob = torch.sum(c_action_log_prob, dim=-1)                
+                c_action_log_prob = torch.sum(c_action_log_prob, dim=-1)
 
             if not self.disable_thinker:
-                c_reset_log_prob = compute_discrete_log_prob(reset_logits, reset)     
+                c_reset_log_prob = compute_discrete_log_prob(reset_logits, reset)
                 c_reset_log_prob = c_reset_log_prob * (env_out.step_status <= 1).float()
                 # if next action is real action, reset will never be used
                 c_action_log_prob += c_reset_log_prob
 
-            # pack last step's action and action prob        
-            pri_env = pri[-1, :, 0] if not self.tuple_action else pri[-1]        
+            # pack last step's action and action prob
+            pri_env = pri[-1, :, 0] if not self.tuple_action else pri[-1]
             if not self.disable_thinker:
-                action = (pri_env, reset[-1])            
+                action = (pri_env, reset[-1])
             else:
-                action = pri_env        
+                action = pri_env
 
-            if self.discrete_action:   
-                action_prob = F.softmax(pri_logits, dim=-1)    
+            if self.discrete_action:
+                action_prob = F.softmax(pri_logits, dim=-1)
             else:
                 action_prob = pri_param
-            if not self.tuple_action: action_prob = action_prob[:, :, 0]    
+            if not self.tuple_action: action_prob = action_prob[:, :, 0]
 
         if self.critic:
             # compute baseline
@@ -876,7 +882,7 @@ class ActorNetSingle(ActorBaseNet):
                     reg_loss += 1e-5 * pre_reg_loss
         else:
             reg_loss = None
-        
+
         actor_out = ActorOut(
             pri=pri if self.actor else None,
             pri_param=pri_param if self.actor else None,
@@ -884,7 +890,7 @@ class ActorNetSingle(ActorBaseNet):
             reset_logits=reset_logits if self.actor else None,
             action=action if self.actor else None,
             action_prob=action_prob if self.actor else None,
-            c_action_log_prob=c_action_log_prob if self.actor else None,            
+            c_action_log_prob=c_action_log_prob if self.actor else None,
             baseline=baseline if self.critic else None,
             baseline_enc=baseline_enc if self.critic else None,
             entropy_loss=entropy_loss if self.actor else None,
@@ -892,8 +898,8 @@ class ActorNetSingle(ActorBaseNet):
             misc=misc,
         )
         core_state = tuple(new_core_state)
-        return actor_out, core_state    
-    
+        return actor_out, core_state
+
     def compute_encoded_real_state(self, env_out, core_state, rnn_done):
         T, B = env_out.step_status.shape[:2]
         core_state_ = core_state[self.state_idx['r']] if self.real_state_rnn else None
@@ -904,28 +910,28 @@ class ActorNetSingle(ActorBaseNet):
 
         need_update = need_update[:, 0] # shape (T,)
         if torch.all(~need_update):
-            last_pre_encoded_real_state = core_state[self.state_idx['pre_encoded_real_state']][0]            
+            last_pre_encoded_real_state = core_state[self.state_idx['pre_encoded_real_state']][0]
             expand_shape = (T,) + (1,) * (len(last_pre_encoded_real_state.shape) - 1)
-            pre_encoded_real_state = last_pre_encoded_real_state.repeat(*expand_shape)            
-            last_encoded_real_state = core_state[self.state_idx['encoded_real_state']][0]            
+            pre_encoded_real_state = last_pre_encoded_real_state.repeat(*expand_shape)
+            last_encoded_real_state = core_state[self.state_idx['encoded_real_state']][0]
             expand_shape = (T,) + (1,) * (len(last_encoded_real_state.shape) - 1)
-            encoded_real_state = last_encoded_real_state.repeat(*expand_shape)            
+            encoded_real_state = last_encoded_real_state.repeat(*expand_shape)
             new_core_state = core_state_
             return pre_encoded_real_state, encoded_real_state, new_core_state, 0. # should only happen in self-play
 
         real_states = env_out.real_states
         if real_states.shape[0] == T:
-            real_states = real_states[need_update]        
+            real_states = real_states[need_update]
         else:
             real_states = real_states[:torch.sum(need_update).item()]
         real_states = self.normalize(real_states.float())
-        with autocast(enabled=self.float16): 
+        with autocast(enabled=self.float16):
             real_states = torch.flatten(real_states, 0, 1)
             if self.real_state_ch > 0:
                 real_states = real_states[:, -self.real_state_ch:]
-            pre_encoded_real_state = self.real_state_encoder(real_states)  
+            pre_encoded_real_state = self.real_state_encoder(real_states)
 
-        if self.float16: pre_encoded_real_state = pre_encoded_real_state.float()        
+        if self.float16: pre_encoded_real_state = pre_encoded_real_state.float()
 
         if self.real_state_rnn:
             rnn_done = rnn_done[need_update]
@@ -935,14 +941,14 @@ class ActorNetSingle(ActorBaseNet):
         else:
             if self.record_state: self.hidden_state = self.real_state_encoder.hidden_state
             new_core_state = None
-            encoded_real_state = pre_encoded_real_state       
+            encoded_real_state = pre_encoded_real_state
 
         last_x = core_state[self.state_idx['pre_encoded_real_state']][0]
-        xs = pre_encoded_real_state        
+        xs = pre_encoded_real_state
         pre_encoded_real_state = self.repeat_for_no_update(last_x, xs, need_update, B)
 
         last_x = core_state[self.state_idx['encoded_real_state']][0]
-        xs = encoded_real_state        
+        xs = encoded_real_state
         encoded_real_state = self.repeat_for_no_update(last_x, xs, need_update, B)
 
         pre_reg_loss = torch.sum(torch.square(pre_encoded_real_state.view(T, B, -1)), dim=-1) / 2
@@ -958,7 +964,7 @@ class ActorNetSingle(ActorBaseNet):
             if need_update[t]:
                 last_x = xs[k]
                 k += 1
-            xs_ls.append(last_x)        
+            xs_ls.append(last_x)
         xs = torch.stack(xs_ls)
         return torch.flatten(xs, 0, 1)
 

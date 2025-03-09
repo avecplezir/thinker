@@ -42,6 +42,7 @@ model_disable_bn: true # whether to disable batch norm in model
 model_zero_init: true # whether to zero initialize the model's predicted rewards and values
 model_has_memory: false # whether to enable memory in model
 model_ordinal: false # whether to use ordinal representation in model's policy
+dreaming_policy: false # whether to train dreaming policy and value network
 vp_fix_bootstrap: false # vp use fixed bootstrap target at the last unroll step
 # wrapper for env
 discrete_k: -1 # bin used to discretize the action space; -1 for no discretizing

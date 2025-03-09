@@ -151,7 +151,21 @@ class SModelLearner:
     def compute_beta(self):
         c = min(self.real_step, self.flags.total_steps) / self.flags.total_steps
         return self.flags.priority_beta * (1 - c) + 1.0 * c
-    
+
+    def update_actor_in_imagination(self, actor_net, model_net, states):
+
+        initial_per_state = model_net.initial_state(batch_size=self.env_n, device=self.device)
+
+        for i in range(self.flags.model_unroll_len):
+            pass_action = actor_net(states)
+            model_net_out = model_net(env_state=states,
+                                      done=None,
+                                      actions=pass_action,
+                                      state=initial_per_state, )
+            states = model_net_out["env_states"]
+
+
+
     def init_psteps(self, data):
         if data is not None and not self.start_training:                                    
             # record the last processed steps from buffer
