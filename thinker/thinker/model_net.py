@@ -1,18 +1,24 @@
 from collections import namedtuple
 import torch
+from torch.distributions.categorical import Categorical
 from torch import nn
 from torch.nn import functional as F
+from typing import Iterable
+
 from thinker import util
 from thinker.core.module import conv3x3, ResBlock, MLP, OneDResBlock
 from thinker.core.rnn import ConvAttnLSTM, LSTMReset
-import math
 
 OutNetOut = namedtuple(
     "OutNetOut",
     [
-        "rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits", "policy", "dream_vs", "dream_policy"
+        "rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits", "policy",
+        "dream_vs", "dream_policy", "dream_logprob", "dream_policy_actions",
     ],
 )
+DreamingOut =  namedtuple("DreamingOut", [
+    "rs", "dones", "dream_policy", "dream_policy_actions", "dream_logprob", "dream_vs"
+])
 SRNetOut = namedtuple(
     "SRNetOut",
     ["rs", "r_enc_logits", "dones", "done_logits", "xs", "hs", "state", "noise_loss"],
@@ -21,11 +27,23 @@ VPNetOut = namedtuple(
     "VPNetOut",
     ["rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits",
         "policy", "hs", "pred_zs", "true_zs", "state",
+        "dream_vs", "dream_policy", "dream_logprob", "dream_policy_actions",
     ],
 )
 DualNetOut = namedtuple(
-    "DualNetOut", ["rs", "dones", "vs", "v_enc_logits", "policy", "xs", "hs", "zs", "state"]
+    "DualNetOut",
+    ["rs", "dones", "vs", "v_enc_logits", "policy", "xs", "hs", "zs", "state",
+        "dream_vs", "dream_policy",
+                   ]
 )
+
+
+def get_parameters(modules: Iterable[nn.Module]):
+    model_parameters = []
+    for module in modules:
+        model_parameters += list(module.parameters())
+    return model_parameters
+
 
 class BaseNet(nn.Module):
     def __init__(self):
@@ -45,23 +63,24 @@ class BaseNet(nn.Module):
         else:
             self.load_state_dict({k: v.to(device) for k, v in weights.items()})
 
+
 # Model Network
 
 class FrameEncoder(nn.Module):
     def __init__(
-        self,
-        prefix,
-        dim_rep_actions,
-        input_shape,
-        size_nn=1,
-        downscale_c=2,
-        downscale=True,
-        concat_action=True,
-        decoder=False,
-        decoder_depth=0,
-        frame_stack_n=1,
-        disable_bn=False,
-        has_memory=False,
+            self,
+            prefix,
+            dim_rep_actions,
+            input_shape,
+            size_nn=1,
+            downscale_c=2,
+            downscale=True,
+            concat_action=True,
+            decoder=False,
+            decoder_depth=0,
+            frame_stack_n=1,
+            disable_bn=False,
+            has_memory=False,
     ):
         super(FrameEncoder, self).__init__()
         self.prefix = prefix
@@ -70,8 +89,8 @@ class FrameEncoder(nn.Module):
         self.downscale_c = downscale_c
         self.decoder = decoder
         self.decoder_depth = decoder_depth
-        self.frame_stack_n = frame_stack_n        
-        self.input_shape = input_shape        
+        self.frame_stack_n = frame_stack_n
+        self.input_shape = input_shape
         self.concat_action = concat_action
         self.oned_input = len(self.input_shape) == 1
         self.has_memory = has_memory
@@ -144,8 +163,8 @@ class FrameEncoder(nn.Module):
 
             # Block 4
             self.avg2 = nn.AvgPool2d(3, stride=stride, padding=1)
-            h, w = output_shape_f(h, w, 3, stride, 1)        
-            self.layer_shape.append((out_channels * 2, h, w))            
+            h, w = output_shape_f(h, w, 3, stride, 1)
+            self.layer_shape.append((out_channels * 2, h, w))
             self.out_shape = self.layer_shape[-1]
 
             if self.has_memory:
@@ -166,7 +185,7 @@ class FrameEncoder(nn.Module):
                     out_channels * 2,
                     out_channels * 2,
                 ]
-                for i in range(4-self.decoder_depth):
+                for i in range(4 - self.decoder_depth):
                     if i in [1, 3]:
                         d_conv.extend(
                             [ResBlock(inplanes=conv_channels[4 - i], disable_bn=disable_bn) for _ in range(n_block)]
@@ -180,8 +199,8 @@ class FrameEncoder(nn.Module):
                             stride=2,
                             padding=1,
                         )
-                    )            
-                self.d_conv = nn.Sequential(*d_conv)   
+                    )
+                self.d_conv = nn.Sequential(*d_conv)
         else:
             n_block = 2 * size_nn
             hidden_size = 512 // downscale_c
@@ -190,30 +209,30 @@ class FrameEncoder(nn.Module):
                 nn.Linear(in_channels, hidden_size),
                 nn.LayerNorm(hidden_size),
                 nn.Tanh()
-            )            
-            self.res = nn.Sequential(*[OneDResBlock(hidden_size) for _ in range(n_block)])    
+            )
+            self.res = nn.Sequential(*[OneDResBlock(hidden_size) for _ in range(n_block)])
             self.out_shape = (hidden_size,)
-            
+
             if self.has_memory:
-                #self.rnn = ConvAttnLSTM(input_dim=hidden_size, hidden_dim=hidden_size//2, num_layers=2, attn=False)
+                # self.rnn = ConvAttnLSTM(input_dim=hidden_size, hidden_dim=hidden_size//2, num_layers=2, attn=False)
                 self.rnn = LSTMReset(input_dim=hidden_size, hidden_dim=hidden_size, num_layers=2)
-                #self.rnn_fc = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.ReLU())   
+                # self.rnn_fc = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.ReLU())
 
             if self.decoder:
                 self.d_res = nn.Sequential(*[OneDResBlock(hidden_size) for _ in range(n_block)])
-                self.output_block = nn.Linear(hidden_size, input_shape[0])            
+                self.output_block = nn.Linear(hidden_size, input_shape[0])
 
         self.initial_state(batch_size=1)
 
     def initial_state(self, batch_size=1, device=None):
         state = {}
-        self.per_state_len = 0    
+        self.per_state_len = 0
         if self.has_memory:
             enc_state = self.rnn.initial_state(bsz=batch_size, device=device)
             self.per_state_len = len(enc_state)
             for i in range(self.per_state_len): state[f"per_{self.prefix}_{i}"] = enc_state[i]
         return state
-    
+
     def forward_pre_mem(self, x, actions=None, flatten=False, depth=0, end_depth=None):
         """
         Args:
@@ -237,7 +256,7 @@ class FrameEncoder(nn.Module):
         input_shape = x.shape
 
         if end_depth is not None and end_depth <= 0: return x
-        if flatten:            
+        if flatten:
             x = x.view((x.shape[0] * x.shape[1],) + x.shape[2:])
         if self.concat_action and depth <= 0:
             if flatten:
@@ -247,7 +266,7 @@ class FrameEncoder(nn.Module):
             if not self.oned_input:
                 actions = (
                     actions.unsqueeze(-1).unsqueeze(-1).tile([1, 1, x.shape[2], x.shape[3]])
-                )                
+                )
             x = torch.concat([x, actions], dim=1)
 
         if not self.oned_input:
@@ -264,31 +283,31 @@ class FrameEncoder(nn.Module):
                 x = self.res3(x)
             if end_depth is not None and end_depth <= 3: return self.post_process(x, input_shape, flatten)
             if depth <= 3:
-                x = self.avg2(x)            
+                x = self.avg2(x)
         else:
             assert depth == 0
             x = self.input_block(x)
             x = self.res(x)
         return self.post_process(x, input_shape, flatten)
-    
+
     def post_process(self, x, input_shape, flatten):
         if flatten:
             x = x.view(input_shape[:2] + x.shape[1:])
         return x
 
-    def forward(self, x, done, actions, state={}, flatten=False, depth=0):        
+    def forward(self, x, done, actions, state={}, flatten=False, depth=0):
         new_state = {}
-        x = self.forward_pre_mem(x=x, actions=actions, flatten=flatten, depth=depth)        
+        x = self.forward_pre_mem(x=x, actions=actions, flatten=flatten, depth=depth)
         if self.has_memory:
             if not self.oned_input:
                 raise NotImplementedError()
-            else:             
-                enc_state = tuple(state[f"per_{self.prefix}_{i}"] for i in range(self.per_state_len))    
-                if not flatten: 
+            else:
+                enc_state = tuple(state[f"per_{self.prefix}_{i}"] for i in range(self.per_state_len))
+                if not flatten:
                     x = x.unsqueeze(0)
                     if done is not None: done = done.unsqueeze(0)
-                if done is None: done = torch.zeros(x.shape[:2], dtype=torch.bool, device=x.device)                        
-                x, enc_state = self.rnn(x, done, enc_state)                
+                if done is None: done = torch.zeros(x.shape[:2], dtype=torch.bool, device=x.device)
+                x, enc_state = self.rnn(x, done, enc_state)
                 if not flatten: x = x.squeeze(0)
                 for i in range(self.per_state_len): new_state[f"per_{self.prefix}_{i}"] = enc_state[i]
         return x, new_state
@@ -308,7 +327,7 @@ class FrameEncoder(nn.Module):
             if x.shape[2] > decoded_h: x = x[:, :, :decoded_h]
             if x.shape[3] > decoded_w: x = x[:, :, :, :decoded_w]
             if self.decoder_depth == 0:
-                d_shape = list(d_shape) 
+                d_shape = list(d_shape)
                 d_shape[0] = self.input_shape[0] // self.frame_stack_n
             assert tuple(x.shape[1:]) == tuple(d_shape), \
                 f"decoder shape should be {d_shape} instead of {x.shape}"
@@ -316,19 +335,20 @@ class FrameEncoder(nn.Module):
             x = self.d_res(z)
             x = self.output_block(x)
         if flatten:
-            x = x.view(input_shape[:2] + x.shape[1:])        
+            x = x.view(input_shape[:2] + x.shape[1:])
         return x
+
 
 class DynamicModel(nn.Module):
     def __init__(
-        self,
-        dim_rep_actions,
-        inplanes,
-        oned_input,
-        size_nn=1,
-        outplanes=None,
-        disable_half_grad=True,
-        disable_bn=False,
+            self,
+            dim_rep_actions,
+            inplanes,
+            oned_input,
+            size_nn=1,
+            outplanes=None,
+            disable_half_grad=True,
+            disable_bn=False,
     ):
         super(DynamicModel, self).__init__()
         self.dim_rep_actions = dim_rep_actions
@@ -341,15 +361,15 @@ class DynamicModel(nn.Module):
 
         if not self.oned_input:
             res = [
-                ResBlock(
-                    inplanes=inplanes + dim_rep_actions,
-                    outplanes=outplanes,
-                    disable_bn=disable_bn,
-                )
-            ] + [
-                ResBlock(inplanes=outplanes, disable_bn=disable_bn)
-                for i in range(4 * self.size_nn)
-            ]
+                      ResBlock(
+                          inplanes=inplanes + dim_rep_actions,
+                          outplanes=outplanes,
+                          disable_bn=disable_bn,
+                      )
+                  ] + [
+                      ResBlock(inplanes=outplanes, disable_bn=disable_bn)
+                      for i in range(4 * self.size_nn)
+                  ]
             self.res = nn.Sequential(*res)
         else:
             n_block = 2 * size_nn
@@ -378,13 +398,14 @@ class DynamicModel(nn.Module):
             out = self.res(x)
         return out
 
+
 class NoiseModel(nn.Module):
     def __init__(
-        self,
-        in_shape,
-        size_nn,
-        noise_n=20,
-        noise_d=10,
+            self,
+            in_shape,
+            size_nn,
+            noise_n=20,
+            noise_d=10,
     ):
         super(NoiseModel, self).__init__()
         self.in_shape = in_shape
@@ -395,17 +416,17 @@ class NoiseModel(nn.Module):
         assert len(self.in_shape) == 3
 
         res = [
-            ResBlock(
-                inplanes=in_shape[0],
-                outplanes=32,
-                disable_bn=True,
-            )
-        ] + [
-            ResBlock(inplanes=32, disable_bn=True)
-            for i in range(4 * self.size_nn)
-        ]
+                  ResBlock(
+                      inplanes=in_shape[0],
+                      outplanes=32,
+                      disable_bn=True,
+                  )
+              ] + [
+                  ResBlock(inplanes=32, disable_bn=True)
+                  for i in range(4 * self.size_nn)
+              ]
         self.res = nn.Sequential(*res)
-        self.fc = nn.Linear(32*in_shape[1]*in_shape[2], noise_n*noise_d)
+        self.fc = nn.Linear(32 * in_shape[1] * in_shape[2], noise_n * noise_d)
         self.out_shape = (noise_n, noise_d)
 
     def forward(self, x):
@@ -414,35 +435,36 @@ class NoiseModel(nn.Module):
         out = self.fc(out).view(out.shape[0], self.noise_n, self.noise_d)
         return out
 
+
 class OutputNet(nn.Module):
     def __init__(
-        self,
-        action_space,
-        input_shape,
-        reward_n,
-        enc_type,
-        enc_f_type,
-        zero_init,
-        size_nn,
-        predict_v_pi=True,
-        predict_r=True,
-        predict_done=False,
-        ordinal=False,
-        dreaming_policy=False,
+            self,
+            action_space,
+            input_shape,
+            reward_n,
+            enc_type,
+            enc_f_type,
+            zero_init,
+            size_nn,
+            predict_v_pi=True,
+            predict_r=True,
+            predict_done=False,
+            ordinal=False,
+            dreaming_policy=False,
     ):
         super(OutputNet, self).__init__()
 
         self.action_space = action_space
         self.num_actions, self.dim_actions, self.dim_rep_actions, self.tuple_action, self.discrete_action = \
             util.process_action_space(action_space)
-        self.input_shape = input_shape        
+        self.input_shape = input_shape
         self.oned_input = len(self.input_shape) == 1
         self.size_nn = size_nn
         self.reward_n = reward_n
         self.enc_type = enc_type
         self.predict_v_pi = predict_v_pi
         self.predict_r = predict_r
-        self.predict_done = predict_done  
+        self.predict_done = predict_done
         self.ordinal = ordinal
         self.dreaming_policy = dreaming_policy
 
@@ -455,7 +477,7 @@ class OutputNet(nn.Module):
             self.rv_tran = None
             out_n = self.reward_n
 
-        if not self.oned_input:            
+        if not self.oned_input:
             c, h, w = input_shape
             self.conv1 = nn.Conv2d(
                 in_channels=c, out_channels=c // 2, kernel_size=3, padding="same"
@@ -469,7 +491,7 @@ class OutputNet(nn.Module):
             fc_in = self.input_shape[0]
 
         if predict_v_pi:
-            self.fc_logits = nn.Linear(fc_in, self.dim_actions*(self.num_actions if self.discrete_action else 2))
+            self.fc_logits = nn.Linear(fc_in, self.dim_actions * (self.num_actions if self.discrete_action else 2))
             self.fc_v = nn.Linear(fc_in, out_n)
             if zero_init:
                 nn.init.constant_(self.fc_v.weight, 0.0)
@@ -487,7 +509,7 @@ class OutputNet(nn.Module):
             if zero_init:
                 nn.init.constant_(self.fc_r.weight, 0.0)
                 nn.init.constant_(self.fc_r.bias, 0.0)
-        
+
         if self.ordinal:
             indices = torch.arange(self.num_actions).view(-1, 1)
             ordinal_mask = (indices + indices.T) <= (self.num_actions - 1)
@@ -495,28 +517,14 @@ class OutputNet(nn.Module):
             self.register_buffer("ordinal_mask", ordinal_mask)
 
         if self.dreaming_policy:
-            self.dream_fc_logits = nn.Linear(fc_in, self.dim_actions*(self.num_actions if self.discrete_action else 2))
+            self.dream_fc_logits = nn.Linear(fc_in,
+                                             self.dim_actions * (self.num_actions if self.discrete_action else 2))
             self.dream_fc_v = nn.Linear(fc_in, out_n)
             if zero_init:
                 nn.init.constant_(self.fc_v.weight, 0.0)
                 nn.init.constant_(self.fc_v.bias, 0.0)
                 nn.init.constant_(self.fc_logits.weight, 0.0)
                 nn.init.constant_(self.fc_logits.bias, 0.0)
-
-            # self.dreaming_policy = MLP(
-            #     input_size=self.hidden_shape[0],
-            #     layer_sizes=[self.hidden_shape[0] // 2, self.hidden_shape[0] // 4],
-            #     output_size=self.dim_actions,
-            #     output_activation=nn.Identity,
-            #     norm=False
-            # )
-            # self.dreaming_critic = MLP(
-            #     input_size=self.hidden_shape[0],
-            #     layer_sizes=[self.hidden_shape[0] // 2, self.hidden_shape[0] // 4],
-            #     output_size=1,
-            #     output_activation=nn.Identity,
-            #     norm=False
-            # )
 
     def forward(self, h, predict_reward=True):
         x = h
@@ -530,7 +538,7 @@ class OutputNet(nn.Module):
         x_v, x_policy, x_done = x_, x_, x_
 
         if self.predict_v_pi:
-            policy = self._compute_policy(self.fc_logits, x_policy)            
+            policy = self._compute_policy(self.fc_logits, x_policy)
 
             if self.enc_type in [2, 3]:
                 v_enc_logit = self.fc_v(x_v)
@@ -566,8 +574,12 @@ class OutputNet(nn.Module):
         if self.dreaming_policy:
             dream_policy = self._compute_policy(self.dream_fc_logits, x_policy)
             dream_v = self.dream_fc_v(x_v)
+            probs = Categorical(logits=dream_policy)
+            dream_action = probs.sample()
+            dream_logprob = probs.log_prob(dream_action)
         else:
-            dream_policy, dream_v = None, None
+            dream_policy, dream_v, dream_action = None, None, None
+
 
         out = OutNetOut(
             rs=r,
@@ -579,18 +591,37 @@ class OutputNet(nn.Module):
             policy=policy,
             dream_vs=dream_v,
             dream_policy=dream_policy,
+            dream_logprob=dream_logprob,
+            dream_policy_actions=dream_action,
         )
         return out
-    
+
     def _compute_policy(self, fc, x_policy):
         b = x_policy.shape[0]
         policy = fc(x_policy)
         policy = policy.view(b, self.dim_actions, -1)
         if self.ordinal and self.discrete_action:
             norm_softm = F.sigmoid(policy)
-            norm_softm_tiled = torch.tile(norm_softm.unsqueeze(-1), [1,1,1,self.num_actions])
-            policy = torch.sum(torch.log(norm_softm_tiled + 1e-8) * self.ordinal_mask + torch.log(1 - norm_softm_tiled + 1e-8) * (1 - self.ordinal_mask), dim=-1)
+            norm_softm_tiled = torch.tile(norm_softm.unsqueeze(-1), [1, 1, 1, self.num_actions])
+            policy = torch.sum(
+                torch.log(norm_softm_tiled + 1e-8) * self.ordinal_mask + torch.log(1 - norm_softm_tiled + 1e-8) * (
+                            1 - self.ordinal_mask), dim=-1)
         return policy
+
+
+class FreezeParameters:
+    def __init__(self, modules: Iterable[nn.Module]):
+        self.modules = modules
+        self.param_states = [p.requires_grad for p in get_parameters(self.modules)]
+
+    def __enter__(self):
+        for param in get_parameters(self.modules):
+            param.requires_grad = False
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for i, param in enumerate(get_parameters(self.modules)):
+            param.requires_grad = self.param_states[i]
+
 
 class SRNet(nn.Module):
     def __init__(self, obs_shape, action_space, reward_n, flags, frame_stack_n=1):
@@ -602,20 +633,20 @@ class SRNet(nn.Module):
         self.reward_n = reward_n
         self.num_actions, self.dim_actions, self.dim_rep_actions, self.tuple_action, self.discrete_action = \
             util.process_action_space(action_space)
-        
+
         self.enc_type = flags.model_enc_type
         self.size_nn = flags.model_size_nn
-        self.downscale_c = flags.model_downscale_c        
+        self.downscale_c = flags.model_downscale_c
         self.noise_enable = flags.noise_enable
         self.has_memory = flags.model_has_memory
         self.decoder_depth = flags.model_decoder_depth
 
         if self.decoder_depth == 0:
-            self.frame_stack_n = frame_stack_n        
+            self.frame_stack_n = frame_stack_n
         else:
             self.frame_stack_n = 1
         assert self.obs_shape[0] % self.frame_stack_n == 0, \
-            f"obs channel {self.obs_shape[0]} should be divisible by frame stacking number {self.frame_stack_n}"        
+            f"obs channel {self.obs_shape[0]} should be divisible by frame stacking number {self.frame_stack_n}"
         self.frame_ch = self.obs_shape[0] // self.frame_stack_n
 
         self.encoder = FrameEncoder(
@@ -639,7 +670,7 @@ class SRNet(nn.Module):
             inplanes=inplanes,
             oned_input=self.oned_input,
             size_nn=self.size_nn,
-            outplanes=self.hidden_shape[0], 
+            outplanes=self.hidden_shape[0],
             disable_half_grad=True,
             disable_bn=self.flags.model_disable_bn,
         )
@@ -655,7 +686,6 @@ class SRNet(nn.Module):
             predict_r=True,
             predict_done=self.flags.model_done_loss_cost > 0.0,
             ordinal=self.flags.model_ordinal,
-            dreaming_policy=self.flags.dreaming_policy,
         )
         self.rv_tran = self.out.rv_tran
 
@@ -664,20 +694,20 @@ class SRNet(nn.Module):
             pre_in_shape = list(x_shape)
             pre_in_shape[0] = x_shape[0] + self.dim_rep_actions
             self.noise_pre = NoiseModel(
-                in_shape = pre_in_shape,
-                size_nn = 1,
-                noise_n = flags.noise_n,
-                noise_d = flags.noise_d,
-                downscale_c = flags.model_downscale_c,
+                in_shape=pre_in_shape,
+                size_nn=1,
+                noise_n=flags.noise_n,
+                noise_d=flags.noise_d,
+                downscale_c=flags.model_downscale_c,
             )
             post_in_shape = list(x_shape)
             post_in_shape[0] = 2 * x_shape[0] + self.dim_rep_actions
             self.noise_post = NoiseModel(
-                in_shape = post_in_shape,
-                size_nn = 1,
-                noise_n = flags.noise_n,
-                noise_d = flags.noise_d,
-                downscale_c = flags.model_downscale_c,
+                in_shape=post_in_shape,
+                size_nn=1,
+                noise_n=flags.noise_n,
+                noise_d=flags.noise_d,
+                downscale_c=flags.model_downscale_c,
             )
             self.noise_n = flags.noise_n
             self.noise_d = flags.noise_d
@@ -685,8 +715,8 @@ class SRNet(nn.Module):
             self.noise_mlp = flags.noise_mlp
             if self.noise_mlp:
                 self.noise_mlp_net = MLP(
-                    input_size=self.noise_n*self.noise_d,
-                    layer_sizes=[flags.noise_n*2],
+                    input_size=self.noise_n * self.noise_d,
+                    layer_sizes=[flags.noise_n * 2],
                     output_size=flags.noise_n,
                     output_activation=nn.ReLU,
                     norm=False
@@ -709,7 +739,7 @@ class SRNet(nn.Module):
         """
         k, b, *_ = actions.shape
         k = k - 1
-        actions = util.encode_action(actions, self.action_space, one_hot)       
+        actions = util.encode_action(actions, self.action_space, one_hot)
         new_state = {}
         h, enc_state = self.encoder(env_state_norm, done, actions[0], state=state)
         new_state.update(enc_state)
@@ -726,7 +756,7 @@ class SRNet(nn.Module):
         for t in range(1, k + 1):
             if self.noise_enable:
                 if future_env_state_norm is not None:
-                    future_enc = future_enc[t-1]
+                    future_enc = future_enc[t - 1]
                 else:
                     future_enc = None
                 h, noise_loss = self.compute_noise(h, actions[t], future_enc)
@@ -750,10 +780,10 @@ class SRNet(nn.Module):
                     stacked_x = torch.concat([stacked_x[:, self.frame_ch:], xs[i]], dim=1)
                     stacked_xs.append(stacked_x)
                 xs = torch.stack(stacked_xs, dim=0)
-                new_state["last_x"] = stacked_x[:, self.frame_ch:]   
-       
+                new_state["last_x"] = stacked_x[:, self.frame_ch:]
+
         else:
-            xs = None            
+            xs = None
             if self.frame_stack_n > 1:
                 new_state["last_x"] = env_state_norm[:, self.frame_ch:].clone()
 
@@ -781,15 +811,15 @@ class SRNet(nn.Module):
             one_hot (bool): whether to the action use one-hot encoding
         """
         new_state = {}
-        new_state.update({k:v for k, v in state.items() if k.startswith(f"per_sr")})
-        action = util.encode_action(action, self.action_space, one_hot)            
-        h = state["sr_h"]        
-        
+        new_state.update({k: v for k, v in state.items() if k.startswith(f"per_sr")})
+        action = util.encode_action(action, self.action_space, one_hot)
+        h = state["sr_h"]
+
         if self.noise_enable:
             if future_x is not None:
                 future_enc_x, enc_state = self.encoder(future_x, None, action, state)
                 new_state.update(enc_state)
-            else:                
+            else:
                 future_enc_x = None
             h, _ = self.compute_noise(h, action, future_enc_x)
         h = self.RNN(h=h, actions=action)
@@ -801,7 +831,7 @@ class SRNet(nn.Module):
         new_state["sr_h"] = h
         if self.frame_stack_n > 1:
             new_state["last_x"] = x[:, self.frame_ch:].clone()
-        
+
         xs = util.safe_unsqueeze(x, 0)
 
         return SRNetOut(
@@ -814,18 +844,18 @@ class SRNet(nn.Module):
             state=new_state,
             noise_loss=None,
         )
-        
-    def compute_noise(self, h, action, future_enc = None):   
-        b = h.shape[0]   
+
+    def compute_noise(self, h, action, future_enc=None):
+        b = h.shape[0]
         a = (
             action.unsqueeze(-1).unsqueeze(-1).tile([1, 1, h.shape[2], h.shape[3]])
         )
         noise_pre_in = torch.concat([h, a], dim=1)
         noise_pre_logit = self.noise_pre(noise_pre_in)
-        
+
         if future_enc is not None:
             # training mode
-            noise_post_in = torch.concat([noise_pre_in, future_enc], dim=1) 
+            noise_post_in = torch.concat([noise_pre_in, future_enc], dim=1)
             noise_post_logit = self.noise_post(noise_post_in)
             noise_logit = noise_post_logit
         else:
@@ -834,27 +864,30 @@ class SRNet(nn.Module):
             noise_logit = noise_pre_logit
 
         noise_p = F.softmax(noise_logit, dim=-1)
-        noise = torch.multinomial(noise_p.view(b*self.noise_n, self.noise_d), num_samples=1).view(b, self.noise_n)
+        noise = torch.multinomial(noise_p.view(b * self.noise_n, self.noise_d), num_samples=1).view(b, self.noise_n)
         noise = F.one_hot(noise, num_classes=self.noise_d)
         noise = noise.detach() + noise_p - noise_p.detach()
         if not self.noise_mlp:
             noise = torch.sum(noise * torch.arange(self.noise_d, device=noise.device).float(), dim=-1) / self.noise_d
         else:
-            noise = self.noise_mlp_net(noise.view(b, self.noise_n*self.noise_d))
-        noise =  (
+            noise = self.noise_mlp_net(noise.view(b, self.noise_n * self.noise_d))
+        noise = (
             noise.unsqueeze(-1).unsqueeze(-1).tile([1, 1, h.shape[2], h.shape[3]])
         )
         h = torch.concat([h, noise], dim=1)
-        
+
         if future_enc is not None:
             log_pre = F.log_softmax(noise_pre_logit, dim=-1)
             log_post = F.log_softmax(noise_post_logit, dim=-1)
-            noise_loss = self.noise_alpha * torch.sum(F.kl_div(log_post.detach(), log_pre, reduction='none', log_target=True), dim=(-1, -2))
-            noise_loss += (1 - self.noise_alpha) * torch.sum(F.kl_div(log_post, log_pre.detach(), reduction='none', log_target=True), dim=(-1, -2))
+            noise_loss = self.noise_alpha * torch.sum(
+                F.kl_div(log_post.detach(), log_pre, reduction='none', log_target=True), dim=(-1, -2))
+            noise_loss += (1 - self.noise_alpha) * torch.sum(
+                F.kl_div(log_post, log_pre.detach(), reduction='none', log_target=True), dim=(-1, -2))
         else:
             noise_loss = None
-        
-        return h, noise_loss    
+
+        return h, noise_loss
+
 
 class VPNet(nn.Module):
     def __init__(self, obs_shape, action_space, reward_n, flags):
@@ -864,16 +897,16 @@ class VPNet(nn.Module):
         self.oned_input = len(self.obs_shape) == 1
         self.action_space = action_space
         self.num_actions, self.dim_actions, self.dim_rep_actions, self.tuple_action, self.discrete_action = \
-            util.process_action_space(action_space)  
+            util.process_action_space(action_space)
         self.enc_type = flags.model_enc_type
         self.has_memory = flags.model_has_memory
-        self.size_nn = flags.model_size_nn # size_nn: int to adjust for size of model net
-        self.downscale_c = flags.model_downscale_c_vp # downscale_c: int to downscale number of channels; default=2
-        self.use_rnn = not util.check_perfect_model(flags.wrapper_type) # dont use rnn if we have perfect dynamic
-        self.dual_net = flags.dual_net # rnn receives z only when we are using dual net
+        self.size_nn = flags.model_size_nn  # size_nn: int to adjust for size of model net
+        self.downscale_c = flags.model_downscale_c_vp  # downscale_c: int to downscale number of channels; default=2
+        self.use_rnn = not util.check_perfect_model(flags.wrapper_type)  # dont use rnn if we have perfect dynamic
+        self.dual_net = flags.dual_net  # rnn receives z only when we are using dual net
         self.predict_rd = (
-           not flags.dual_net and self.use_rnn
-        )  # network also predicts reward and done if not dual net under non-perfect dynamic   
+                not flags.dual_net and self.use_rnn
+        )  # network also predicts reward and done if not dual net under non-perfect dynamic
         self.decoder_depth = flags.model_decoder_depth
         self.reward_n = reward_n
 
@@ -889,12 +922,12 @@ class VPNet(nn.Module):
         )
         self.hidden_shape = self.encoder.out_shape
         inplanes = self.hidden_shape[0]
-        
+
         if self.use_rnn:
             self.RNN = DynamicModel(
                 dim_rep_actions=self.dim_rep_actions,
                 inplanes=inplanes * 2 if self.dual_net else inplanes,
-                oned_input=self.oned_input, 
+                oned_input=self.oned_input,
                 outplanes=inplanes,
                 size_nn=self.size_nn,
                 disable_half_grad=False,
@@ -912,6 +945,7 @@ class VPNet(nn.Module):
             predict_r=self.predict_rd,
             predict_done=self.predict_rd and self.flags.model_done_loss_cost > 0.0,
             ordinal=self.flags.model_ordinal,
+            dreaming_policy=self.flags.dreaming_policy,
         )
 
         if not self.dual_net:
@@ -976,8 +1010,8 @@ class VPNet(nn.Module):
         if k == 0:
             done = done.unsqueeze(0)
         else:
-            done = torch.concat([done.unsqueeze(0), torch.zeros(k, b, dtype=torch.bool, device=xs.device)], dim=0)        
-        
+            done = torch.concat([done.unsqueeze(0), torch.zeros(k, b, dtype=torch.bool, device=xs.device)], dim=0)
+
         if not self.dual_net:
             enc_in = env_state_norm.unsqueeze(0).detach()
             zs, enc_state = self.encoder(enc_in, done, actions[:1], state, flatten=True)
@@ -986,7 +1020,7 @@ class VPNet(nn.Module):
                 x0 = self.encoder.forward_pre_mem(env_state_norm, actions[0], end_depth=self.decoder_depth)
             full_xs = x0.unsqueeze(0)
             if k > 0: full_xs = torch.concat([full_xs, xs.detach()], dim=0)
-            zs, enc_state = self.encoder(full_xs, done, actions, state, flatten=True, depth=self.decoder_depth)     
+            zs, enc_state = self.encoder(full_xs, done, actions, state, flatten=True, depth=self.decoder_depth)
         new_state.update(enc_state)
 
         if self.use_rnn:
@@ -1020,6 +1054,7 @@ class VPNet(nn.Module):
             pred_zs = zs
 
         new_state["vp_h"] = h
+
         return VPNetOut(
             rs=util.safe_concat(outs[1:], "rs", 0),
             r_enc_logits=util.safe_concat(outs[1:], "r_enc_logits", 0),
@@ -1032,6 +1067,10 @@ class VPNet(nn.Module):
             true_zs=zs,
             pred_zs=pred_zs,
             state=new_state,
+            dream_policy_actions=util.safe_concat(outs.dream_policy_actions, 0),
+            dream_logprob=util.safe_concat(outs.dream_logprob, 0),
+            dream_policy=util.safe_concat(outs.dream_policy, 0),
+            dream_vs=util.safe_concat(outs.dream_vs, 0),
         )
 
     def forward_single(self, action, state, x=None, one_hot=False):
@@ -1043,7 +1082,7 @@ class VPNet(nn.Module):
             one_hot (bool): whether to the action use one-hot encoding
         """
         new_state = {}
-        action = util.encode_action(action, self.action_space, one_hot)          
+        action = util.encode_action(action, self.action_space, one_hot)
         if self.dual_net:
             z, enc_state = self.encoder(x, None, action, state, flatten=False, depth=self.decoder_depth)
             new_state.update(enc_state)
@@ -1070,16 +1109,21 @@ class VPNet(nn.Module):
             true_zs=None,
             pred_zs=util.safe_unsqueeze(pred_z, 0),
             state=new_state,
+            dream_policy_actions=util.safe_concat(out.dream_policy_actions, 0),
+            dream_logprob=util.safe_concat(out.dream_logprob, 0),
+            dream_policy=util.safe_concat(out.dream_policy, 0),
+            dream_vs=util.safe_concat(out.dream_vs, 0),
         )
-    
+
     def compute_z0(self, env_state_norm, done, action, state):
         b, *_ = action.shape
         device = env_state_norm.device
         if done is None:
-            done = torch.zeros(b, dtype=torch.bool, device=device)        
+            done = torch.zeros(b, dtype=torch.bool, device=device)
         enc_in = env_state_norm.unsqueeze(0)
         zs, enc_state = self.encoder(enc_in.detach(), done, action.unsqueeze(0), state, flatten=True)
         return zs[0], enc_state
+
 
 class ModelNet(BaseNet):
     def __init__(self, obs_space, action_space, flags, frame_stack_n=1):
@@ -1089,8 +1133,8 @@ class ModelNet(BaseNet):
         self.obs_shape = obs_space.shape
         self.action_space = action_space
         self.num_actions, self.dim_actions, self.dim_rep_actions, self.tuple_action, self.discrete_action = \
-            util.process_action_space(action_space)  
-        self.oned_input = len(self.obs_shape) == 1        
+            util.process_action_space(action_space)
+        self.oned_input = len(self.obs_shape) == 1
         self.enc_type = flags.model_enc_type
         self.size_nn = flags.model_size_nn
         self.dual_net = flags.dual_net
@@ -1104,14 +1148,14 @@ class ModelNet(BaseNet):
             self.state_dtype_n = 1
         else:
             raise Exception(f"Unupported observation sapce", obs_space)
-        
+
         low = torch.tensor(obs_space.low)
         high = torch.tensor(obs_space.high)
         self.need_norm = torch.isfinite(low).all() and torch.isfinite(high).all()
-        
+
         if self.need_norm:
             self.register_buffer("norm_low", low)
-            self.register_buffer("norm_high", high)        
+            self.register_buffer("norm_high", high)
 
         self.vp_net = VPNet(self.obs_shape, action_space, self.reward_n, flags)
         self.hidden_shape = list(self.vp_net.hidden_shape)
@@ -1133,17 +1177,69 @@ class ModelNet(BaseNet):
         if self.state_dtype_n == 1: assert x.dtype == torch.float32
         if self.need_norm:
             x = (x.float() - self.norm_low) / \
-                (self.norm_high -  self.norm_low)
+                (self.norm_high - self.norm_low)
         return x
-    
+
     def unnormalize(self, x):
-        assert x.dtype == torch.float or x.dtype == torch.float32        
+        assert x.dtype == torch.float or x.dtype == torch.float32
         if self.need_norm:
             ch = x.shape[-3]
             x = torch.clamp(x, 0, 1)
-            x = x * (self.norm_high[-ch:] -  self.norm_low[-ch:]) + self.norm_low[-ch:]
+            x = x * (self.norm_high[-ch:] - self.norm_low[-ch:]) + self.norm_low[-ch:]
             if self.state_dtype_n == 0: x = x.to(torch.uint8)
         return x
+
+    def dreaming_forward(self, env_state_norm, xs, done, actions, state, one_hot=False):
+        """
+         Args:
+             env_state(tensor): normalized env tate with shape (B, C, H, W) in the form of s_t
+             xs(tensor): output from SR-net with shape (k, B, C, H, W) in the form of x_{t+1}, ..., x_{t+k}; or x_{t}
+             done(tensor): done (bool) with shape (B,), in the form of d_t
+             past_action (tensor): action (int64) with shape (k+1, B, D, *), in the form of a_{t-1}
+             one_hot (bool): whether to the action use one-hot encoding
+         Return:
+             VPNetOut tuple with predicted values (vs), policies (logits) in the shape of (k+1, B, ...);
+                 in the form of y_{t}, y_{t+1}, y_{t+2}, ..., y_{t+k} and states with element in the shape of (B, ...)
+         """
+        b = actions.shape[1]
+        k = 5
+        device = actions.device
+        actions = util.encode_action(actions, self.action_space, one_hot)
+        new_state = {}
+        if done is None:
+            done = torch.zeros(b, dtype=torch.bool, device=device)
+        if k == 0:
+            done = done.unsqueeze(0)
+        else:
+            done = torch.concat([done.unsqueeze(0), torch.zeros(k, b, dtype=torch.bool, device=xs.device)], dim=0)
+
+        enc_in = env_state_norm.unsqueeze(0).detach()
+        zs, enc_state = self.vp_net.encoder(enc_in, done, actions[:1], state, flatten=True)
+
+        h = torch.zeros(size=(b,) + self.hidden_shape, device=device)
+        rnn_in = torch.concat([h, zs[0]], dim=1)
+        h = self.vp_net.RNN(h=rnn_in, actions=actions[0])
+        outs = []
+        with FreezeParameters([self.vp_net.RNN]):
+            for t in range(1, k + 1):
+                out = self.vp_net.out(h, predict_reward=t > 0)
+                outs.append(out)
+                probs = Categorical(logits=out.dream_policy)
+                action = probs.sample()
+
+                rnn_in = torch.concat([h, zs[t]], dim=1)
+                h = self.vp_net.RNN(h=rnn_in, actions=action)
+
+        new_state["vp_h"] = h
+        return DreamingOut(
+            rs=util.safe_concat(outs[1:], "rs", 0),
+            dones=util.safe_concat(outs[1:], "dones", 0),
+            dream_policy=util.safe_concat(outs, "dream_policy", 0),
+            dream_policy_actions=util.safe_concat(outs, "dream_policy_actions", 0),
+            dream_logprob=util.safe_concat(outs, "dream_logprob", 0),
+            dream_vs=util.safe_concat(outs, "dream_v", 0),
+        )
+
 
     def forward(self, env_state, done, actions, state, future_env_state=None, training=False):
         """
@@ -1151,7 +1247,7 @@ class ModelNet(BaseNet):
             env_state(tensor): starting frame (uint if normalize else float) with shape (B, C, H, W)
             done(tensor): done (bool) with shape (B,), in the form of d_t
             actions(tensor): action (int64) with shape (k+1, B, D), in the form of a_{t-1}, a_{t}, a_{t+1}, .. a_{t+k-1}
-            normalize (tensor): whether to normalize x 
+            normalize (tensor): whether to normalize x
         Return:
             rs(tensor): predicted reward with shape (k, B, ...), in the form of r_{t+1}, r_{t+2}, ..., r_{t+k}
             done(tensor): predicted done with shape (k, B, ...), in the form of d_{t+1}, d_{t+2}, ..., d_{t+k}
@@ -1163,11 +1259,11 @@ class ModelNet(BaseNet):
         k = k - 1
         new_state = {}
 
-        env_state_norm = self.normalize(env_state)        
+        env_state_norm = self.normalize(env_state)
         future_env_state_norm = self.normalize(future_env_state) if future_env_state is not None else None
 
         if self.dual_net:
-            action = util.encode_action(actions[0], self.vp_net.action_space, one_hot=False)       
+            action = util.encode_action(actions[0], self.vp_net.action_space, one_hot=False)
             x0 = self.vp_net.encoder.forward_pre_mem(env_state_norm, action, end_depth=self.decoder_depth)
             sr_net_out = self.sr_net(env_state_norm, done, actions, state, future_env_state_norm=future_env_state_norm)
             xs = sr_net_out.xs
@@ -1177,7 +1273,7 @@ class ModelNet(BaseNet):
         else:
             sr_net_out = None
             x0 = None
-            xs = None     
+            xs = None
             full_xs = self.normalize(env_state).unsqueeze(0)
 
         vp_net_out = self.vp_net(env_state_norm, x0, xs, done, actions, state)
@@ -1188,12 +1284,12 @@ class ModelNet(BaseNet):
             if k > 0:
                 for t in range(k):
                     acc_done = acc_done | sr_net_out.dones[t]
-                    if torch.any(acc_done): 
-                        full_xs[t+1, acc_done] = full_xs[t, acc_done]
-                        if t < k - 1: sr_net_out.rs[t+1, acc_done] = 0.
-                        vp_net_out.vs[t+1, acc_done] = 0.
+                    if torch.any(acc_done):
+                        full_xs[t + 1, acc_done] = full_xs[t, acc_done]
+                        if t < k - 1: sr_net_out.rs[t + 1, acc_done] = 0.
+                        vp_net_out.vs[t + 1, acc_done] = 0.
 
-            new_state["acc_done"] = acc_done            
+            new_state["acc_done"] = acc_done
             new_state["sr_last_xs"] = full_xs[-1]
 
         return self._prepare_out(sr_net_out, vp_net_out, new_state, full_xs)
@@ -1210,7 +1306,7 @@ class ModelNet(BaseNet):
             sr_net_out = self.sr_net.forward_single(
                 action=action, state=state, future_x=future_x
             )
-            xs = sr_net_out.xs 
+            xs = sr_net_out.xs
             x = xs[0]
             state_.update(sr_net_out.state)
         else:
@@ -1222,10 +1318,10 @@ class ModelNet(BaseNet):
 
         if not training and self.dual_net:
             acc_done = state["acc_done"]
-            if torch.any(acc_done): 
+            if torch.any(acc_done):
                 sr_net_out.rs[-1, acc_done] = 0.
             acc_done = acc_done | sr_net_out.dones[-1]
-            if torch.any(acc_done): 
+            if torch.any(acc_done):
                 xs[-1, acc_done] = state["sr_last_xs"][acc_done]
                 vp_net_out.vs[-1, acc_done] = 0.
             state_["acc_done"] = acc_done
@@ -1233,7 +1329,7 @@ class ModelNet(BaseNet):
 
         return self._prepare_out(sr_net_out, vp_net_out, state_, xs)
 
-    def _prepare_out(self, sr_net_out, vp_net_out,  state, xs):
+    def _prepare_out(self, sr_net_out, vp_net_out, state, xs):
         rd_out = sr_net_out if self.dual_net else vp_net_out
         if self.dual_net:
             hs = torch.concat([sr_net_out.hs, vp_net_out.hs], dim=2)
@@ -1246,7 +1342,7 @@ class ModelNet(BaseNet):
 
         if self.reward_clip > 0.:
             if rs is not None:
-                rs[:, :, 0] = torch.clamp(rs[:, :, 0], -self.reward_clip, +self.reward_clip)         
+                rs[:, :, 0] = torch.clamp(rs[:, :, 0], -self.reward_clip, +self.reward_clip)
             assert not vs.requires_grad, "grad needs to be disabled at inference mode"
             vs[:, :, 0] = torch.clamp(vs[:, :, 0], -self.value_clip, +self.value_clip)
         return DualNetOut(
@@ -1259,8 +1355,10 @@ class ModelNet(BaseNet):
             hs=hs,
             zs=vp_net_out.pred_zs,
             state=state,
+            dream_vs=vp_net_out.dream_vs,
+            dream_policy=vp_net_out.dream_policy,
         )
-    
+
     def compute_vs_loss(self, vs, v_enc_logits, target_vs):
         k, b, n = target_vs.shape
 
@@ -1268,7 +1366,7 @@ class ModelNet(BaseNet):
             vs_loss = (vs[:k] - target_vs.detach()) ** 2
             vs_loss = torch.sum(vs_loss, dim=-1)
         else:
-            vs_loss = 0.        
+            vs_loss = 0.
             for i in range(n):
                 target_vs_enc_v = self.vp_net.rv_tran.encode(target_vs[:, :, i])
                 vs_loss = vs_loss + torch.nn.CrossEntropyLoss(reduction="none")(
@@ -1277,7 +1375,8 @@ class ModelNet(BaseNet):
                 )
             vs_loss = vs_loss.view(k, b)
         return vs_loss
-    
+
+
 class RVTran(nn.Module):
     def __init__(self, enc_type, enc_f_type=0, eps=0.001):
         super(RVTran, self).__init__()
@@ -1286,7 +1385,7 @@ class RVTran(nn.Module):
             2,
             3,
         ], f"only enc_type [1, 2, 3] is supported, not {enc_type}"
-        self.enc_f_type = enc_f_type # 0 for MuZero encoding, 1 for Dreamer (symexp)
+        self.enc_f_type = enc_f_type  # 0 for MuZero encoding, 1 for Dreamer (symexp)
         self.support = 300 if self.enc_f_type == 0 else 20
         self.eps = eps
         self.enc_type = enc_type
@@ -1310,7 +1409,7 @@ class RVTran(nn.Module):
                 enc_s = self.encode_s(x)
                 enc = self.vector_enc(enc_s)
             return enc
-        
+
     def vector_enc(self, x):
         x = torch.clamp(x, self.atom_vector[0], self.atom_vector[-1])
         # Find the indices of the atoms that are greater than or equal to the elements in x
@@ -1363,11 +1462,12 @@ class RVTran(nn.Module):
     def decode_s(self, x):
         if self.enc_f_type == 0:
             return torch.sign(x) * (
-                torch.square(
-                    (torch.sqrt(1 + 4 * self.eps * (torch.abs(x) + 1 + self.eps)) - 1)
-                    / (2 * self.eps)
-                )
-                - 1
+                    torch.square(
+                        (torch.sqrt(1 + 4 * self.eps * (torch.abs(x) + 1 + self.eps)) - 1)
+                        / (2 * self.eps)
+                    )
+                    - 1
             )
         else:
             return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
+

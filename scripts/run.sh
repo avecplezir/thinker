@@ -106,3 +106,4 @@ python thinker/train.py --xpid thinker_t10 --rec_t 10 --use_wandb true
 #                --discounting 0.99 \
 #                --use_wandb true
 
+python thinker/train.py --xpid thinker_2gpus --model_warm_up_n 1000 --use_wandb true

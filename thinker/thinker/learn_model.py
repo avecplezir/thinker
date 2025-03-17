@@ -14,6 +14,7 @@ import thinker.util as util
 import gc
 from collections import namedtuple
 
+
 def compute_cross_entropy_loss(policy, target_policy, discrete_action, require_prob, is_weights, mask=None):
     k, b, d, _ = policy.shape
     if discrete_action:
@@ -31,13 +32,14 @@ def compute_cross_entropy_loss(policy, target_policy, discrete_action, require_p
             tar_mean, tar_log_var, mean, log_var, reduce="mean"
         )
     else:
-        loss = 0.5 * (log_var + ((policy - mean) ** 2) /  torch.exp(log_var))
+        loss = 0.5 * (log_var + ((policy - mean) ** 2) / torch.exp(log_var))
         loss = torch.mean(loss, dim=-1)
     if mask is not None: loss = loss * mask
     loss = torch.sum(loss, dim=0)
     loss = is_weights * loss
     return torch.sum(loss)
-   
+
+
 class SModelLearner:
     def __init__(self, name, ray_obj, model_param, flags, model_net=None, device=None):
         self.flags = flags
@@ -53,7 +55,7 @@ class SModelLearner:
             self.model_net.train(True)
             if self.flags.gpu_learn > 0. and torch.cuda.is_available():
                 self.device = torch.device("cuda")
-            else:           
+            else:
                 self.device = torch.device("cpu")
         else:
             assert model_net is not None, "actor_net is required for non-parallel mode"
@@ -73,7 +75,7 @@ class SModelLearner:
 
         lr_lambda = (
             lambda epoch: 1
-            - min(epoch, self.flags.total_steps) / self.flags.total_steps
+                          - min(epoch, self.flags.total_steps) / self.flags.total_steps
         )
 
         opt = getattr(flags, "model_optimizer", "adam")
@@ -94,15 +96,15 @@ class SModelLearner:
             self.scheduler_m = torch.optim.lr_scheduler.LambdaLR(
                 self.optimizer_m, lr_lambda
             )
-            self.scaler_m = GradScaler(init_scale=2**3) if self.flags.float16 else None
-        
+            self.scaler_m = GradScaler(init_scale=2 ** 3) if self.flags.float16 else None
+
         param_groups = self.model_net.vp_net.parameters()
         self.optimizer_p = Optimizer(param_groups, lr=flags.model_learning_rate, **opt_args)
 
         self.scheduler_p = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer_p, lr_lambda
         )
-        self.scaler_p = GradScaler(init_scale=2**3) if self.flags.float16 else None
+        self.scaler_p = GradScaler(init_scale=2 ** 3) if self.flags.float16 else None
 
         self.ckp_path = os.path.join(flags.ckpdir, "ckp_model.tar")
         if flags.ckp: self.load_checkpoint(self.ckp_path)
@@ -119,7 +121,7 @@ class SModelLearner:
         self.model_net.to(self.device)
         if self.flags.dual_net:
             util.optimizer_to(self.optimizer_m, self.device)
-        util.optimizer_to(self.optimizer_p, self.device)               
+        util.optimizer_to(self.optimizer_p, self.device)
 
         self.timing = util.Timings() if self.time else None
         self.perfect_model = util.check_perfect_model(flags.wrapper_type)
@@ -146,36 +148,23 @@ class SModelLearner:
         self.finish = False
 
     def read_buffer_ptr(self):
-        return self.model_buffer.read.remote(self.model_T, self.model_B, self.compute_beta(), add_t=self.flags.model_return_n+1)
+        return self.model_buffer.read.remote(self.model_T, self.model_B, self.compute_beta(),
+                                             add_t=self.flags.model_return_n + 1)
 
     def compute_beta(self):
         c = min(self.real_step, self.flags.total_steps) / self.flags.total_steps
         return self.flags.priority_beta * (1 - c) + 1.0 * c
 
-    def update_actor_in_imagination(self, actor_net, model_net, states):
-
-        initial_per_state = model_net.initial_state(batch_size=self.env_n, device=self.device)
-
-        for i in range(self.flags.model_unroll_len):
-            pass_action = actor_net(states)
-            model_net_out = model_net(env_state=states,
-                                      done=None,
-                                      actions=pass_action,
-                                      state=initial_per_state, )
-            states = model_net_out["env_states"]
-
-
-
     def init_psteps(self, data):
-        if data is not None and not self.start_training:                                    
+        if data is not None and not self.start_training:
             # record the last processed steps from buffer
             self.last_psteps = int(data["processed_n"])
             if not self.flags.ckp:
                 self.real_step += self.last_psteps
                 # if it is not loading from checkpoint, the steps
                 # used to fill the model should also be counted
-            self.start_training = True   
-    
+            self.start_training = True
+
     def log_preload(self, status):
         if self.timer() - self.start_time > 5:
             self._logger.info(
@@ -192,7 +181,7 @@ class SModelLearner:
                 if self.time: self.timing.reset()
                 # get data remotely
                 if self.replay_ratio < self.flags.max_replay_ratio:
-                    while True:                    
+                    while True:
                         data = ray.get(data_ptr)
                         ray.internal.free(data_ptr)
                         data_ptr = self.read_buffer_ptr()
@@ -200,10 +189,10 @@ class SModelLearner:
                         if data is not None: break
                         time.sleep(0.01)
                         status = ray.get(self.model_buffer.get_status.remote())
-                        self.log_preload(status)                    
-                        if status["finish"]: 
+                        self.log_preload(status)
+                        if status["finish"]:
                             self.finish = True
-                            break                    
+                            break
 
                     if self.time: self.timing.time("get_data")
                     if data == "FINISH" or self.finish: break
@@ -211,7 +200,7 @@ class SModelLearner:
 
                     # start consume data
                     self.consume_data(data)
-                    del data                
+                    del data
                     gc.collect()
                     model_update = True
                 else:
@@ -234,9 +223,9 @@ class SModelLearner:
                     time.sleep(0.01)
                     status = ray.get(self.model_buffer.get_status.remote())
                     self.replay_ratio = status["replay_ratio"]
-                    if status["finish"]: 
+                    if status["finish"]:
                         self.finish = True
-                        break 
+                        break
 
             self._logger.info("Terminating model-learning thread")
             self.model_buffer.set_finish.remote()
@@ -252,16 +241,16 @@ class SModelLearner:
         finally:
             self.close()
             return True
-        
+
     def update_real_step(self, data):
         new_psteps = data["processed_n"]
-        new_psteps = int(new_psteps)        
+        new_psteps = int(new_psteps)
         self.real_step += new_psteps - self.last_psteps
         self.last_psteps = new_psteps
 
     def consume_data(self, data, model_buffer=None):
         # model_buffer is only provided in non-parallel mode
-        # which is required for updating the priorities of 
+        # which is required for updating the priorities of
         # transition in the buffer
         self.n += 1
         self.update_real_step(data)
@@ -292,7 +281,7 @@ class SModelLearner:
                 losses_m["total_loss_m"], self.optimizer_m, self.scheduler_m, self.scaler_m
             )
             if self.timing is not None:
-                self.timing.time("gradient_step_m")            
+                self.timing.time("gradient_step_m")
         else:
             losses_m = {}
             total_norm_m = torch.zeros(1, device=self.device)
@@ -323,27 +312,27 @@ class SModelLearner:
             self.sps_buffer[self.sps_buffer_n] = (self.step, self.timer())
             self.sps_buffer_n = (self.sps_buffer_n + 1) % len(self.sps_buffer)
             sps = (
-                self.sps_buffer[self.sps_buffer_n - 1][0]
-                - self.sps_buffer[self.sps_buffer_n][0]
-            ) / (
-                self.sps_buffer[self.sps_buffer_n - 1][1]
-                - self.sps_buffer[self.sps_buffer_n][1]
-            )
+                          self.sps_buffer[self.sps_buffer_n - 1][0]
+                          - self.sps_buffer[self.sps_buffer_n][0]
+                  ) / (
+                          self.sps_buffer[self.sps_buffer_n - 1][1]
+                          - self.sps_buffer[self.sps_buffer_n][1]
+                  )
             tot_sps = (self.step - self.sps_start_step) / (
-                self.timer() - self.sps_start_time
+                    self.timer() - self.sps_start_time
             )
             print_str = (
-                "[%s] Steps %i (%i[%.1f]) @ %.1f SPS (%.1f). norm_m %.2f norm_p %.2f"
-                % (
-                    self.flags.xpid,
-                    self.real_step,
-                    self.step,
-                    self.step_per_transition(),
-                    sps,
-                    tot_sps,
-                    total_norm_m.item(),
-                    total_norm_p.item(),
-                )
+                    "[%s] Steps %i (%i[%.1f]) @ %.1f SPS (%.1f). norm_m %.2f norm_p %.2f"
+                    % (
+                        self.flags.xpid,
+                        self.real_step,
+                        self.step,
+                        self.step_per_transition(),
+                        sps,
+                        tot_sps,
+                        total_norm_m.item(),
+                        total_norm_p.item(),
+                    )
             )
             print_stats = [
                 "total_loss_m",
@@ -420,11 +409,11 @@ class SModelLearner:
         else:
             done_loss = None
         return done_loss
-    
-    def compute_state_loss(self, tar, pred, mask, is_weights, cos=False):        
+
+    def compute_state_loss(self, tar, pred, mask, is_weights, cos=False):
         if not cos:
             diff = tar - pred
-            if not self.model_net.oned_input:                        
+            if not self.model_net.oned_input:
                 state_loss = torch.mean(torch.square(diff), dim=(2, 3, 4))
             else:
                 state_loss = torch.mean(torch.square(diff), dim=2)
@@ -441,16 +430,18 @@ class SModelLearner:
 
     def compute_losses_m(self, train_model_out, target, is_weights):
         k, b = self.flags.model_unroll_len, train_model_out.real_state.shape[1]
-        initial_per_state = {sk: getattr(train_model_out, sk)[0] for sk in train_model_out._fields if sk.startswith("per")}
+        initial_per_state = {sk: getattr(train_model_out, sk)[0] for sk in train_model_out._fields if
+                             sk.startswith("per")}
         if self.flags.model_mem_unroll_len > 0:
             past_env_state_norm = self.model_net.normalize(train_model_out.initial_per_state["past_real_state"])
             past_done = train_model_out.initial_per_state["past_done"]
             past_action = train_model_out.initial_per_state["past_action"]
             past_action = util.encode_action(past_action, self.model_net.action_space, one_hot=False)
-            _, per_state = self.model_net.sr_net.encoder(past_env_state_norm, past_done, past_action, initial_per_state, flatten=True)
+            _, per_state = self.model_net.sr_net.encoder(past_env_state_norm, past_done, past_action, initial_per_state,
+                                                         flatten=True)
 
-            #dbg_per_state = {sk: sv[-1] for sk, sv in train_model_out.initial_per_state.items() if sk.startswith("per")}
-            #for sk in per_state.keys(): print(sk, torch.sum(torch.abs(per_state[sk] - dbg_per_state[sk])))
+            # dbg_per_state = {sk: sv[-1] for sk, sv in train_model_out.initial_per_state.items() if sk.startswith("per")}
+            # for sk in per_state.keys(): print(sk, torch.sum(torch.abs(per_state[sk] - dbg_per_state[sk])))
         else:
             per_state = initial_per_state
 
@@ -460,7 +451,8 @@ class SModelLearner:
             done=train_model_out.done[0],
             actions=train_model_out.action[: k + 1],
             state=per_state,
-            future_env_state_norm=self.model_net.normalize(train_model_out.real_state[1:k+1]) if self.flags.noise_enable else None,
+            future_env_state_norm=self.model_net.normalize(
+                train_model_out.real_state[1:k + 1]) if self.flags.noise_enable else None,
         )
         rs_loss = self.compute_rs_loss(
             target,
@@ -471,28 +463,31 @@ class SModelLearner:
         )
         done_loss = self.compute_done_loss(target, out.done_logits, is_weights)
         target_env_state_norm = self.model_net.normalize(target["env_states"])
-        action = util.encode_action(train_model_out.action[1 : k + 1], self.model_net.action_space, one_hot=False)        
+        action = util.encode_action(train_model_out.action[1: k + 1], self.model_net.action_space, one_hot=False)
         if not self.flags.fea_loss_inf_bn:
             bn_stat = util.clone_bn_running_stats(self.model_net.vp_net)
         else:
             self.model_net.vp_net.train(False)
-        with torch.no_grad():  
+        with torch.no_grad():
             target_xs = self.model_net.vp_net.encoder.forward_pre_mem(
-                    target_env_state_norm, action, flatten=True, end_depth=self.flags.model_decoder_depth
+                target_env_state_norm, action, flatten=True, end_depth=self.flags.model_decoder_depth
             )
         if self.flags.model_img_loss_cost > 0.:
-            img_loss = self.compute_state_loss(target_xs, out.xs, target["done_mask"][1:], is_weights, self.flags.img_fea_cos)
+            img_loss = self.compute_state_loss(target_xs, out.xs, target["done_mask"][1:], is_weights,
+                                               self.flags.img_fea_cos)
         else:
             img_loss = None
         if self.flags.model_fea_loss_cost > 0.:
-            with torch.no_grad():                
+            with torch.no_grad():
                 target_enc = self.model_net.vp_net.encoder.forward_pre_mem(
                     target_xs, action, flatten=True, depth=self.flags.model_decoder_depth
                 )
-            pred_enc = self.model_net.vp_net.encoder.forward_pre_mem(out.xs, action, flatten=True, depth=self.flags.model_decoder_depth)
-            fea_loss = self.compute_state_loss(target_enc, pred_enc, target["done_mask"][1:], is_weights, self.flags.img_fea_cos)
+            pred_enc = self.model_net.vp_net.encoder.forward_pre_mem(out.xs, action, flatten=True,
+                                                                     depth=self.flags.model_decoder_depth)
+            fea_loss = self.compute_state_loss(target_enc, pred_enc, target["done_mask"][1:], is_weights,
+                                               self.flags.img_fea_cos)
         else:
-            fea_loss = None        
+            fea_loss = None
         if not self.flags.fea_loss_inf_bn:
             util.restore_bn_running_stats(self.model_net.vp_net, bn_stat)
         else:
@@ -529,7 +524,8 @@ class SModelLearner:
     def compute_losses_p(self, train_model_out, target, is_weights, pred_xs):
         k, b = self.flags.model_unroll_len, train_model_out.real_state.shape[1]
         vp_net = self.model_net.vp_net
-        initial_per_state = {sk: getattr(train_model_out, sk)[0] for sk in train_model_out._fields if sk.startswith("per")}
+        initial_per_state = {sk: getattr(train_model_out, sk)[0] for sk in train_model_out._fields if
+                             sk.startswith("per")}
 
         if self.flags.model_mem_unroll_len > 0:
             past_env_state_norm = self.model_net.normalize(train_model_out.initial_per_state["past_real_state"])
@@ -538,33 +534,33 @@ class SModelLearner:
             past_action = util.encode_action(past_action, self.model_net.action_space, one_hot=False)
             _, per_state = vp_net.encoder(past_env_state_norm, past_done, past_action, initial_per_state, flatten=True)
         else:
-            per_state = initial_per_state      
-        
-        if self.perfect_model:            
+            per_state = initial_per_state
+
+        if self.perfect_model:
             env_state_norm = self.model_net.normalize(train_model_out.real_state)
             out = vp_net.forward(
-                env_state_norm=env_state_norm[:k+1].view(((k+1) * b,) + env_state_norm.shape[2:]),
+                env_state_norm=env_state_norm[:k + 1].view(((k + 1) * b,) + env_state_norm.shape[2:]),
                 x0=None,
                 xs=None,
-                done=train_model_out.done[:k+1].view(1, (k+1) * b,),
-                actions=train_model_out.action[:k+1].view(1, (k+1) * b, -1),
+                done=train_model_out.done[:k + 1].view(1, (k + 1) * b, ),
+                actions=train_model_out.action[:k + 1].view(1, (k + 1) * b, -1),
                 state={},
             )
-            vs = out.vs.view(k+1, b, self.reward_n)
-            v_enc_logits = util.safe_view(out.v_enc_logits, (k+1, b, self.reward_n, -1))
-            policy = out.policy.view((k+1, b) + out.policy.shape[2:])
+            vs = out.vs.view(k + 1, b, self.reward_n)
+            v_enc_logits = util.safe_view(out.v_enc_logits, (k + 1, b, self.reward_n, -1))
+            policy = out.policy.view((k + 1, b) + out.policy.shape[2:])
         else:
             env_state_norm = self.model_net.normalize(train_model_out.real_state[0])
             out = vp_net.forward(
                 env_state_norm=env_state_norm,
                 x0=None,
-                xs=pred_xs, 
+                xs=pred_xs,
                 done=train_model_out.done[0],
-                actions=train_model_out.action[: k + 1],  # a_-1, ..., a_k-1                
+                actions=train_model_out.action[: k + 1],  # a_-1, ..., a_k-1
                 state=per_state,
             )
-            vs = out.vs.view(k+1, b, self.reward_n)
-            v_enc_logits = util.safe_view(out.v_enc_logits, (k+1, b, self.reward_n, -1))
+            vs = out.vs.view(k + 1, b, self.reward_n)
+            v_enc_logits = util.safe_view(out.v_enc_logits, (k + 1, b, self.reward_n, -1))
             policy = out.policy
 
         done_mask = target["done_mask"]
@@ -580,8 +576,8 @@ class SModelLearner:
 
         # compute vs loss
         vs_loss = self.model_net.compute_vs_loss(
-            vs=vs, 
-            v_enc_logits=v_enc_logits, 
+            vs=vs,
+            v_enc_logits=v_enc_logits,
             target_vs=target["vs"],
         )
         vs_loss = vs_loss * done_mask
@@ -600,12 +596,12 @@ class SModelLearner:
                 target_policy = target["actions"].detach().float()
 
         policy_loss = compute_cross_entropy_loss(
-            policy, 
-            target_policy, 
+            policy,
+            target_policy,
             self.model_net.discrete_action,
             self.flags.require_prob,
-            is_weights, 
-            mask=done_mask, 
+            is_weights,
+            mask=done_mask,
         )
 
         # compute reg loss
@@ -627,8 +623,8 @@ class SModelLearner:
             "reg_loss": reg_loss,
         }
         total_loss = (
-            self.flags.model_vs_loss_cost * vs_loss
-            + self.flags.model_policy_loss_cost * policy_loss
+                self.flags.model_vs_loss_cost * vs_loss
+                + self.flags.model_policy_loss_cost * policy_loss
         )
         if self.model_net.vp_net.predict_rd:
             total_loss = total_loss + self.flags.model_rs_loss_cost * rs_loss
@@ -643,48 +639,103 @@ class SModelLearner:
 
         # compute priorities
         if self.flags.priority_alpha > 0.0:
-            priorities = torch.absolute(vs[0, :, 0] - target["vs"][0, :, 0]) # vs error on first time step wrt primiary reward
+            priorities = torch.absolute(
+                vs[0, :, 0] - target["vs"][0, :, 0])  # vs error on first time step wrt primiary reward
             priorities = priorities.detach().cpu().numpy()
         else:
             priorities = None
 
         return losses, priorities
 
+    # dreaming
+    def compute_losses_d(self, train_model_out, pred_xs):
+        k, b = self.flags.model_unroll_len, train_model_out.real_state.shape[1]
+        initial_per_state = {sk: getattr(train_model_out, sk)[0] for sk in train_model_out._fields if
+                             sk.startswith("per")}
+
+        per_state = initial_per_state
+
+        env_state_norm = self.model_net.normalize(train_model_out.real_state[0])
+        out = self.model_net.vp_net.forward(
+            env_state_norm=env_state_norm,
+            x0=None,
+            xs=pred_xs,
+            done=train_model_out.done[0],
+            actions=train_model_out.action[:1],  # a_-1
+            state=per_state,
+        )
+
+        with torch.no_grad():
+            next_value = out.dream_vs[-1].reshape(1, -1)
+            advantages = torch.zeros_like(out.rs)
+            rewards = train_model_out.rs
+            values = out.dream_vs
+            dones = out.dones
+            lastgaelam = 0
+            next_done = dones[-1]
+            for t in reversed(range(self.flags.model_unroll_len - 1)):
+                if t == self.flags.model_unroll_len - 2:
+                    nextnonterminal = 1.0 - next_done
+                    nextvalues = next_value
+                else:
+                    nextnonterminal = 1.0 - dones[t + 1]
+                    nextvalues = values[t + 1]
+                delta = rewards[t] + self.flags.discounting * nextvalues * nextnonterminal - values[t]
+                advantages[
+                    t] = lastgaelam = delta + self.flags.discounting * self.flags.gae_lambda * nextnonterminal * lastgaelam
+            returns = advantages + values
+
+        # compute vs loss
+        vs_loss = self.model_net.compute_vs_loss(out.dream_vs, None, returns)
+        # compute policy loss
+        pg_loss = (-advantages * out.dream_logprob).mean()
+        # reg loss
+        reg_loss = 1e-3 * torch.sum(torch.square(out.dream_polciy))
+
+        losses = {
+            "dream_vs_loss": vs_loss,
+            "dream_pg_loss": pg_loss,
+            "dream_reg_loss": reg_loss,
+        }
+
+        return losses
+
     def prepare_data(self, train_model_out):
         k, b = self.flags.model_unroll_len, train_model_out.real_state.shape[1]
         ret_n = self.flags.model_return_n
         target_env_states = train_model_out.real_state
-        target_rewards = train_model_out.reward[1 : k + 1]  # true reward r_1, r_2, ..., r_k
-        target_action_probs = train_model_out.action_prob[1 : k + 2]  # true logits l_0, l_1, ..., l_k-1        
-        target_actions = train_model_out.action[1 : k + 2]  # true actions l_0, l_1, ..., l_k-1
+        target_rewards = train_model_out.reward[1: k + 1]  # true reward r_1, r_2, ..., r_k
+        target_action_probs = train_model_out.action_prob[1: k + 2]  # true logits l_0, l_1, ..., l_k-1
+        target_actions = train_model_out.action[1: k + 2]  # true actions l_0, l_1, ..., l_k-1
 
         reward = train_model_out.reward
-        done = train_model_out.done | train_model_out.truncated_done    
+        done = train_model_out.done | train_model_out.truncated_done
         baseline = train_model_out.baseline[:, :, :self.reward_n]
 
         if not self.flags.vp_fix_bootstrap:
             target_vs = train_model_out.baseline[ret_n + 1: ret_n + 2 + k]  # baseline ranges from v_k, v_k+1, ... v_2k
             for t in range(ret_n, 0, -1):
                 target_vs = (
-                    target_vs
-                    * self.flags.discounting
-                    * (~done[t : k + t + 1]).float().unsqueeze(-1)
-                    + train_model_out.reward[t : k + t + 1]
+                        target_vs
+                        * self.flags.discounting
+                        * (~done[t: k + t + 1]).float().unsqueeze(-1)
+                        + train_model_out.reward[t: k + t + 1]
                 )
-                t_done = train_model_out.truncated_done[t : k + t + 1]
+                t_done = train_model_out.truncated_done[t: k + t + 1]
                 if torch.any(t_done):
-                    target_vs[t_done] = train_model_out.baseline[t : k + t + 1][t_done]
+                    target_vs[t_done] = train_model_out.baseline[t: k + t + 1][t_done]
 
         else:
-            target_v = train_model_out.baseline[k + 1] # v is in the form of v_-1, v_0, .., v_k; this target_v is v_k
+            target_v = train_model_out.baseline[k + 1]  # v is in the form of v_-1, v_0, .., v_k; this target_v is v_k
             target_vs = [target_v]
             for t in range(k, 0, -1):
-                target_v = train_model_out.reward[t] + self.flags.discounting * target_v * (~done[t]).float().unsqueeze(-1)
+                target_v = train_model_out.reward[t] + self.flags.discounting * target_v * (~done[t]).float().unsqueeze(
+                    -1)
                 t_done = train_model_out.truncated_done[t]
                 if torch.any(t_done):
                     target_v[t_done] = train_model_out.baseline[t][t_done]
                 target_vs.append(target_v)
-            
+
             target_vs.reverse()
             target_vs = torch.stack(target_vs)
 
@@ -721,8 +772,8 @@ class SModelLearner:
             target_done = None
 
         return {
-            "env_states": target_env_states[1 : k + 1],
-            "rewards": target_rewards,            
+            "env_states": target_env_states[1: k + 1],
+            "rewards": target_rewards,
             "actions": target_actions,
             "action_probs": target_action_probs,
             "vs": target_vs,
@@ -730,7 +781,7 @@ class SModelLearner:
             "trun_done": trun_done,
             "done_mask": done_mask,
         }
-    
+
     def gradient_step(self, loss, optimizer, scheduler, scaler=None):
         # gradient descent on loss
         if self.flags.model_optimizer == "sgd":
@@ -740,10 +791,10 @@ class SModelLearner:
             scaler.scale(loss).backward()
         else:
             loss.backward()
-                
+
         if scaler is not None:
             scaler.unscale_(optimizer)
-        
+
         optimize_params = optimizer.param_groups[0]["params"]
         if self.flags.model_grad_norm_clipping > 0:
             total_norm = torch.nn.utils.clip_grad_norm_(
@@ -751,7 +802,7 @@ class SModelLearner:
             )
         else:
             total_norm = util.compute_grad_norm(optimize_params)
-        
+
         if scaler is not None:
             scaler.step(optimizer)
             scaler.update()
@@ -772,23 +823,23 @@ class SModelLearner:
         while True:
             weights = ray.get(
                 self.param_buffer.get_data.remote("model_net")
-            )  
+            )
             if weights is not None:
                 self.model_net.set_weights(weights)
                 del weights
-                break                
-            time.sleep(0.1)  
+                break
+            time.sleep(0.1)
 
     def refresh_actor(self):
         while True:
             weights = ray.get(
                 self.actor_param_buffer.get_data.remote("actor_net")
-            )  
+            )
             if weights is not None:
                 self.actor_net.set_weights(weights)
                 del weights
-                break                
-            time.sleep(0.1)  
+                break
+            time.sleep(0.1)
 
     def save_checkpoint(self):
         self._logger.info("Saving model checkpoint to %s" % self.ckp_path)
@@ -810,7 +861,7 @@ class SModelLearner:
         try:
             torch.save(d, self.ckp_path + ".tmp")
             os.replace(self.ckp_path + ".tmp", self.ckp_path)
-        except:       
+        except:
             pass
 
     def load_checkpoint(self, ckp_path: str):
@@ -828,6 +879,8 @@ class SModelLearner:
     def close(self):
         self.plogger.close()
 
+
 @ray.remote
 class ModelLearner(SModelLearner):
     pass
+

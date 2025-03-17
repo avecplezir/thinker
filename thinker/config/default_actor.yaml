@@ -5,6 +5,7 @@ name: "Sokoban-v0" # name of the environment
 require_prob: true # whether to use prob to train model instead of sampled action
 parallel: true # whether to use a parallel ray actor for training the model
 discounting: 0.97 # discount rate of the raw MDP
+gae_lambda: 0.95 # lambda for GAE (used only for the dreaming policy)
 reward_clip: -1.0 # reward clipping; if positve, the reward is clipped within the absolute value of this values
 # training setting
 train_actor: true # whether to train actor
