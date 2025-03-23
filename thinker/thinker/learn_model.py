@@ -6,6 +6,7 @@ import traceback
 import ray
 import torch
 import torch.nn.functional as F
+from torch.distributions.categorical import Categorical
 from torch.cuda.amp import GradScaler, autocast
 from thinker.core.file_writer import FileWriter
 from thinker.core.module import guassian_kl_div
@@ -144,6 +145,9 @@ class SModelLearner:
             self.data_ptr = self.read_buffer_ptr()
         self.start_training = False
         self.finish = False
+
+        from thinker.main import EnvImagination
+        self.im_env = EnvImagination(model_net=self.model_net)
 
     def read_buffer_ptr(self):
         return self.model_buffer.read.remote(self.model_T, self.model_B, self.compute_beta(), add_t=self.flags.model_return_n+1)
@@ -294,6 +298,15 @@ class SModelLearner:
         )
         if self.timing is not None:
             self.timing.time("gradient_step_p")
+
+        if self.flags.imagination_loss:
+            with autocast(enabled=self.flags.float16):
+                losses_im = self.compute_losses_im(train_model_out)
+            if self.timing is not None:
+                self.timing.time("compute_losses_im")
+            total_norm_im = self.gradient_step(
+                losses_im["total_loss_im"], self.optimizer_p, self.scheduler_p, self.scaler_p
+            )
         if self.flags.priority_alpha > 0:
             if model_buffer is None:
                 self.model_buffer.update_priority.remote(idx, priorities)
@@ -304,6 +317,8 @@ class SModelLearner:
             self.timing.time("update_priority")
         losses = losses_m
         losses.update(losses_p)
+        if self.flags.imagination_loss:
+            losses.update(losses_im)
         # print statistics
         if self.timer() - self.start_time > 5:
             self.sps_buffer[self.sps_buffer_n] = (self.step, self.timer())
@@ -371,6 +386,69 @@ class SModelLearner:
             self.ckp_start_time = int(time.strftime("%M")) // 10
         if self.timing is not None:
             self.timing.time("misc")
+
+    def compute_losses_im(self, train_model_out):
+        """
+        Computes Dreamer-style losses using policy gradient for values and policy.
+        """
+        # Reset the imagination environment
+        print('computing losses im')
+        print('train_model_out.real_state', train_model_out.real_state.shape)
+        model_net_out = self.im_env.reset(train_model_out.real_state[0], train_model_out.action[0])
+
+        log_probs, values, rewards, entropy = [], [], [], []
+
+        for i in range(5):
+            im_policy_out = model_net_out.policy #self.model_net.im_policy(model_net_out)
+            probs = Categorical(logits=im_policy_out)
+            action = probs.sample()
+            log_prob = probs.log_prob(action)
+            ent = probs.entropy()
+            value = model_net_out.vs
+            model_net_out, reward, done, *_ = self.im_env.step(action.squeeze(0))
+
+            log_probs.append(log_prob.squeeze(-1))
+            values.append(value.squeeze(-1))
+            rewards.append(reward.squeeze(-1))
+            entropy.append(ent.squeeze(-1))
+
+        # Convert lists to tensors
+        log_probs = torch.concat(log_probs, dim=0)
+        values = torch.concat(values, dim=0)
+        rewards = torch.concat(rewards, dim=0).detach()
+        entropy = torch.concat(entropy, dim=0)
+
+        # Compute returns using λ-return (generalized advantage estimation - GAE)
+        gamma, lambda_ = 0.99, 0.95
+        advantages = torch.zeros_like(rewards)
+        gae = 0
+        next_value = model_net_out.vs.detach().flatten(0)
+
+        for t in reversed(range(len(rewards))):
+            delta = rewards[t] + gamma * next_value - values[t]
+            gae = delta + gamma * lambda_ * gae
+            advantages[t] = gae
+            next_value = values[t]
+        returns = advantages + values
+
+        # Policy loss: maximize expected return using policy gradient
+        policy_loss = -(log_probs * advantages.detach()).mean()
+
+        # Value loss: MSE between predicted values and target returns
+        value_loss = F.mse_loss(values, returns.detach())
+
+        # Entropy loss for exploration bonus
+        entropy_loss = -torch.mean(entropy)
+
+        # Total loss (weighted sum of policy, value, and entropy losses)
+        loss = policy_loss + 0.5 * value_loss + 0.01 * entropy_loss
+
+        return {
+            "total_loss_im": loss,
+            "policy_loss_im": policy_loss,
+            "value_loss_im": value_loss,
+            "entropy_loss_im": entropy_loss,
+        }
 
     def compute_rs_loss(self, target, rs, r_enc_logits, rv_tran, is_weights):
         k, b = self.flags.model_unroll_len, target["rewards"].shape[1]
