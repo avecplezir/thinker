@@ -987,10 +987,27 @@ class DRCNet(ActorBaseNet):
         h, w = output_shape(self.real_states_shape[1], self.real_states_shape[2], 8, 4, 2)
         h, w = output_shape(h, w, 4, 2, 1)
 
+        if self.flags.use_latent_action:
+            self.latent_action_dim = 16
+            self.latent_action_dim_emb_dim = 32
+            self.latent_policy = nn.Sequential(
+                    nn.ReLU(),
+                    nn.Conv2d(
+                        in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
+                    ),
+                    nn.ReLU(),
+                    nn.Conv2d(
+                        in_channels=hidden_dim, out_channels=self.latent_action_dim, kernel_size=3, stride=1, padding=1
+                    ),
+                )
+            self.action_emb = nn.Embedding(self.latent_action_dim, self.latent_action_dim_emb_dim)
+        else:
+            latent_action_dim_emb_dim = 0
+
         print('flags.tran_t', flags.tran_t)
         self.num_layers = 3
         self.core = ConvAttnLSTM(
-            input_dim=hidden_dim,
+            input_dim=hidden_dim + latent_action_dim_emb_dim,
             hidden_dim=hidden_dim,
             num_layers=self.num_layers,
             attn=False,
@@ -1003,19 +1020,6 @@ class DRCNet(ActorBaseNet):
             tran_t=1,
             pool_inject=True,
         )
-
-        if self.flags.use_latent_action:
-            latent_action_dim = 16
-            self.latent_policy =  nn.Sequential(
-                    nn.ReLU(),
-                    nn.Conv2d(
-                        in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
-                    ),
-                    nn.ReLU(),
-                    nn.Conv2d(
-                        in_channels=hidden_dim, out_channels=latent_action_dim, kernel_size=3, stride=1, padding=1
-                    ),
-                )
 
         if flags.use_predictor:
             if flags.predictor_acchitecture == 'simple':
@@ -1062,6 +1066,13 @@ class DRCNet(ActorBaseNet):
         else:
             return self.core.initial_state(batch_size, device=device)
 
+    def latent_action_policy(self, x):
+        latent_action_logits = self.latent_policy(x)
+        latent_action = sample(latent_action_logits, greedy=False, dim=-1)
+        latent_action_emb = self.action_emb(latent_action)
+        c_action_log_prob = compute_discrete_log_prob(latent_action_logits, latent_action)
+        return latent_action_emb, c_action_log_prob
+
     def forward(self, env_out, core_state=(), clamp_action=None, compute_loss=False, greedy=False):
         done = env_out.done
         assert (
@@ -1075,6 +1086,11 @@ class DRCNet(ActorBaseNet):
 
         latent_baselines = []
         for lstm_interation in range(3):
+            if self.flags.use_latent_action:
+                latent_action_emb, c_action_log_prob = self.latent_action_policy(core_input)
+                core_input = torch.cat([core_input, latent_action_emb], dim=1)
+                c_action_log_prob = c_action_log_prob.view(T, B)
+
             core_input, core_state = self.core(core_input, done, core_state[:2*self.num_layers], record_state=self.record_state)
 
             if self.record_state: self.hidden_state = self.core.hidden_state

@@ -135,7 +135,7 @@ class SActorLearner:
             self.ret_buffers["cur"] = RetBuffer(max_actor_id, mean_n=400)
         self.ret_buffers["len"] = RetBuffer(max_actor_id, mean_n=400)
         print('rec_t', self.flags.rec_t)
-        self.im_discounting = self.flags.discounting ** (1 / 3)
+        self.im_discounting = self.flags.discounting ** (1 / self.flags.rec_t)
 
         self.rewards_ls = ["re"]
         if flags.im_cost > 0.0:
@@ -503,11 +503,14 @@ class SActorLearner:
         train_actor_out_baseline = train_actor_out.baseline.permute(0, 2, 1, 3).reshape(3*T, B, 1)
 
         rewards = train_actor_out.reward
+        # print('rewards', rewards[:, 0])
 
         def augment_w_zero(x):
-            return torch.cat([x, torch.zeros_like(x), torch.zeros_like(x)], dim=1).view(3*T, B)
+            return torch.cat([torch.zeros_like(x), torch.zeros_like(x), x], dim=1).view(3*T, B)
 
         rewards = augment_w_zero(rewards).unsqueeze(-1)
+        # print('rewards 2', rewards[2::3, 0])
+        # print('rewards 3', rewards[:, 0])
 
         # compute advantage and baseline        
         pg_losses = []
@@ -530,6 +533,7 @@ class SActorLearner:
 
         if not self.ppo_enable or self.flags.ppo_v_trace:
             log_rhos = new_actor_out.c_action_log_prob - train_actor_out.c_action_log_prob
+            # print('log_rhos', log_rhos[:, 0])
         else:
             log_rhos = torch.zeros_like(train_actor_out.c_action_log_prob)
 
@@ -581,9 +585,15 @@ class SActorLearner:
             vs = v_trace.vs if not self.ppo_enable else vs
             pg_losses.append(pg_loss)
             if self.flags.critic_enc_type == 0:
+                if self.flags.extend_baseline:
+                    target_baseline = new_actor_out_baseline[2::3, :, i]
+                    vs_reduced = vs[2::3]
+                else:
+                    target_baseline = new_actor_out_baseline[:, :, i]
+                    vs_reduced = vs
                 baseline_loss = compute_baseline_loss(
-                    baseline=new_actor_out_baseline[:, :, i],
-                    target_baseline=vs,
+                    baseline=target_baseline,
+                    target_baseline=vs_reduced,
                     mask=masks[i]
                 )
             else:
@@ -599,7 +609,10 @@ class SActorLearner:
 
         # sum all the losses
         total_loss = pg_losses[0] / self.actor_net.dim_actions
-        total_loss += self.flags.baseline_cost * baseline_losses[0]
+        if self.flags.extend_baseline:
+            total_loss += self.flags.baseline_cost * baseline_losses[0] / 3
+        else:
+            total_loss += self.flags.baseline_cost * baseline_losses[0]
 
         losses = {
             "pg_loss": pg_losses[0],
