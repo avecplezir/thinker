@@ -1227,12 +1227,96 @@ class MCTS(ActorBaseNet):
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
+
+class DRCOptionNet(DRCNet):
+    def __init__(self, obs_space, action_space, flags, tree_rep_meaning=None, record_state=False):
+        super(DRCOptionNet, self).__init__(obs_space, action_space, flags, tree_rep_meaning, record_state)
+
+    def forward(self, env_out, core_state=(), clamp_action=None, compute_loss=False, greedy=False):
+        done = env_out.done
+        assert (
+                len(done.shape) == 2
+        ), f"done shape should be (T, B) instead of {done.shape}"
+        T, B = done.shape
+        x = self.normalize(env_out.real_states.float())
+        x = torch.flatten(x, 0, 1)
+        x_enc = self.encoder(x)
+        core_input = x_enc.view(*((T, B) + x_enc.shape[1:]))
+        core_output, core_state = self.core(core_input, done, core_state, record_state=self.record_state)
+        if self.record_state: self.hidden_state = self.core.hidden_state
+        core_output = torch.flatten(core_output, 0, 1)
+        core_output = torch.cat([x_enc, core_output], dim=1)
+        core_output = torch.flatten(core_output, 1)
+        final_out = F.relu(self.final_layer(core_output))
+
+        pri_logits = self.policy(final_out)
+        pri_logits = pri_logits.view(T * B, self.dim_actions, self.num_actions)
+
+        # compute entropy loss
+        if compute_loss:
+            entropy_loss = -torch.nn.CrossEntropyLoss(reduction="none")(
+                input=torch.flatten(pri_logits, 0, 1),
+                target=torch.flatten(F.softmax(pri_logits, dim=-1), 0, 1),
+            )
+            entropy_loss = entropy_loss.view(T, B, self.dim_actions)
+            entropy_loss = torch.sum(entropy_loss, dim=-1)
+        else:
+            entropy_loss = None
+
+        # sample_action
+        pri = sample(pri_logits, greedy=greedy, dim=-1)
+        pri_logits = pri_logits.view(T, B, self.dim_actions, self.num_actions)
+        pri = pri.view(T, B, self.dim_actions)
+
+        # clamp the action to clamp_action
+        if clamp_action is not None:
+            pri[:clamp_action.shape[0]] = clamp_action
+
+        # compute chosen log porb
+        c_action_log_prob = compute_discrete_log_prob(pri_logits, pri)
+
+        # pack last step's action and action prob
+        pri_env = pri[-1, :, 0] if not self.tuple_action else pri[-1]
+        action = pri_env
+        action_prob = F.softmax(pri_logits, dim=-1)
+        if not self.tuple_action: action_prob = action_prob[:, :, 0]
+
+        baseline = self.baseline(final_out).view(T, B, 1)
+
+        if compute_loss:
+            reg_loss = (
+                    1e-3 * torch.sum(torch.square(pri_logits), dim=(-2, -1))
+                    + 1e-5 * torch.sum(torch.square(self.baseline.weight))
+                    + 1e-5 * torch.sum(torch.square(self.policy.weight))
+            )
+        else:
+            reg_loss = None
+
+        actor_out = ActorOut(
+            pri=pri,
+            pri_param=pri_logits,
+            reset=None,
+            reset_logits=None,
+            action=action,
+            action_prob=action_prob,
+            c_action_log_prob=c_action_log_prob,
+            baseline=baseline,
+            baseline_enc=None,
+            entropy_loss=entropy_loss,
+            reg_loss=reg_loss,
+            misc={},
+        )
+        return actor_out, core_state
+
+
 def ActorNet(*args, **kwargs):
 
     if getattr(kwargs["flags"], "drc", False):        
         Net = DRCNet
     elif getattr(kwargs["flags"], "mcts", False):  
         Net = MCTS
+    elif getattr(kwargs["flags"], "drc_option", False):
+        Net = DRCOptionNet
     elif not getattr(kwargs["flags"], "sep_actor_critic", False):
         Net = ActorNetSingle
     else:

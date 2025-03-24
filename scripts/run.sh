@@ -15,21 +15,37 @@ seeds=${SLURM_ARRAY_TASK_ID}
 source activate /home/mila/i/ivan.anokhin/anaconda3/envs/thinker
 
 
-python thinker/train.py --xpid thinkerv2 --model_warm_up_n 500 --imagination_loss true --use_wandb false
+#python thinker/train.py --xpid thinkerv2 --model_warm_up_n 500 --rec_t 10 --imagination_loss true --use_wandb false
 
 export WANDB_USER=irina-rish
-python thinker/train.py --drc true \
-                --xpid drc_gamma098_check \
-                --tran_t 1 \
-                --actor_unroll_len 20 \
-                --reg_cost 0.01 \
-                --actor_learning_rate 4e-4 \
-                --entropy_cost 1e-2 \
-                --v_trace_lamb 0.97 \
-                --actor_adam_eps 1e-4 \
-                --has_model false \
-                --discounting 0.98 \
-                --use_wandb true
+python thinker/train.py \
+              --xpid thinker_onegpu_v4 \
+              --imagination_loss false \
+              --rec_t 10 \
+              --use_wandb true
+
+#python thinker/train.py \
+#              --xpid thinker_r10_isweightsonly_dfeatures_sum_v4 \
+#              --model_warm_up_n 10000 \
+#              --detach_features false \
+#              --imagination_loss true \
+#              --rec_t 10 \
+#              --use_wandb true
+
+#python thinker/train.py --xpid thinker_r10_v3 --model_warm_up_n 10000 --imagination_loss false --rec_t 10 --use_wandb true
+
+#python thinker/train.py --drc true \
+#                --xpid drc_gamma098_check \
+#                --tran_t 1 \
+#                --actor_unroll_len 20 \
+#                --reg_cost 0.01 \
+#                --actor_learning_rate 4e-4 \
+#                --entropy_cost 1e-2 \
+#                --v_trace_lamb 0.97 \
+#                --actor_adam_eps 1e-4 \
+#                --has_model false \
+#                --discounting 0.98 \
+#                --use_wandb true
 
 
 #python thinker/train.py --drc true \

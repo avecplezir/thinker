@@ -445,6 +445,7 @@ class EnvImagination(Env):
                  ):
 
         self.device = torch.device("cuda")
+        self.detach_features = flags.detach_features
 
         if model_net is not None:
             self.model_net = model_net
@@ -484,7 +485,8 @@ class EnvImagination(Env):
         # print('self.state', [(key, self.state[key].shape) for key in self.state.keys()])
         model_net_out = self.model_net.forward_single(
             state=self.state,
-            action=action)
+            action=action,
+            detach_features=self.detach_features)
 
         self.state = model_net_out.state
 

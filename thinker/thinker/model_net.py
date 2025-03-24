@@ -998,7 +998,7 @@ class VPNet(nn.Module):
             state=new_state,
         )
 
-    def forward_single(self, action, state, x=None, one_hot=False):
+    def forward_single(self, action, state, x=None, one_hot=False, detach_features=False):
         """
         Single unroll of the network with one action
         Args:
@@ -1015,6 +1015,8 @@ class VPNet(nn.Module):
         else:
             rnn_in = state["vp_h"]
         h = self.RNN(h=rnn_in, actions=action)
+        if detach_features:
+            h = h.detach()
         out = self.out(h, predict_reward=True)
         new_state["vp_h"] = h
 
@@ -1109,7 +1111,7 @@ class ModelNet(BaseNet):
             if self.state_dtype_n == 0: x = x.to(torch.uint8)
         return x
 
-    def forward(self, env_state, done, actions, state, future_env_state=None, training=False):
+    def forward(self, env_state, done, actions, state, future_env_state=None, training=False,):
         """
         Args:
             env_state(tensor): starting frame (uint if normalize else float) with shape (B, C, H, W)
@@ -1162,7 +1164,7 @@ class ModelNet(BaseNet):
 
         return self._prepare_out(sr_net_out, vp_net_out, new_state, full_xs)
 
-    def forward_single(self, state, action, future_x=None, training=False):
+    def forward_single(self, state, action, future_x=None, training=False, detach_features=False):
         """
         One-step transition from z_t, h_t, a_t to predicted z_{t+1}, h_{t+1}, r_{t+1}, v_{t+1}, pi_{t+1}
         Args:
@@ -1180,7 +1182,7 @@ class ModelNet(BaseNet):
         else:
             x = None
         vp_net_out = self.vp_net.forward_single(
-            action=action, state=state, x=x,
+            action=action, state=state, x=x, detach_features=detach_features,
         )
         state_.update(vp_net_out.state)
 
