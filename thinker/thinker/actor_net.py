@@ -1004,6 +1004,19 @@ class DRCNet(ActorBaseNet):
             pool_inject=True,
         )
 
+        if self.flags.use_latent_action:
+            latent_action_dim = 16
+            self.latent_policy =  nn.Sequential(
+                    nn.ReLU(),
+                    nn.Conv2d(
+                        in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
+                    ),
+                    nn.ReLU(),
+                    nn.Conv2d(
+                        in_channels=hidden_dim, out_channels=latent_action_dim, kernel_size=3, stride=1, padding=1
+                    ),
+                )
+
         if flags.use_predictor:
             if flags.predictor_acchitecture == 'simple':
                 self.predictor = nn.Sequential(
@@ -1060,11 +1073,9 @@ class DRCNet(ActorBaseNet):
         x_enc = self.encoder(x)
         core_input = x_enc.view(*((T, B) + x_enc.shape[1:]))
 
-        print('core_input', core_input.shape)
         latent_baselines = []
         for lstm_interation in range(3):
             core_input, core_state = self.core(core_input, done, core_state[:2*self.num_layers], record_state=self.record_state)
-            print('core_input', core_input.shape)
 
             if self.record_state: self.hidden_state = self.core.hidden_state
             core_output = torch.flatten(core_input, 0, 1)

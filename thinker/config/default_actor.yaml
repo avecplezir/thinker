@@ -61,6 +61,7 @@ enc_1d_norm: true # enable layer normalization in 1d encoder
 enc_1d_block: 2 # number of res block for 1d encoder
 enc_1d_hs: 256 # hidden size of 1d encoder
 # -rnn setting
+use_latent_action: false # whether to use latent action in rnn
 tran_t: 1 # internal transition step for rnn
 tran_mem_n: 40 # memory slot size for the attention module in lstm-attn
 tran_layer_n: 3 # number of layers of lstm-attn
