@@ -399,12 +399,13 @@ class SModelLearner:
         unroll_steps_im = 5
         print('is_weights', is_weights.shape)
         print('train_model_out.real_state.shape[0]', train_model_out.real_state.shape[0])
-        discount = self.flags.im_gamma * torch.ones(train_model_out.real_state.shape[0], device=self.device).to(is_weights.device)
-        im_weights = torch.cumprod(torch.cat([torch.ones_like(discount[:1]), discount[:unroll_steps_im-1]], 0), 0).detach().unsqueeze(-1)
+        # discount = self.flags.im_gamma * torch.ones(train_model_out.real_state.shape[0], device=self.device).to(is_weights.device)
+        # im_weights = torch.cumprod(torch.cat([torch.ones_like(discount[:1]), discount[:unroll_steps_im-1]], 0), 0).detach().unsqueeze(-1)
+
         for sample_idx in range(train_model_out.real_state.shape[0]):
             model_net_out = self.im_env.reset(train_model_out.real_state[sample_idx], train_model_out.action[sample_idx])
 
-            log_probs, values, rewards, entropy = [], [], [], []
+            log_probs, values, rewards, entropy, dones = [], [], [], [], []
 
             for i in range(unroll_steps_im):
                 im_policy_out = model_net_out.policy #self.model_net.im_policy(model_net_out)
@@ -419,12 +420,14 @@ class SModelLearner:
                 values.append(value.squeeze(-1))
                 rewards.append(reward.squeeze(-1))
                 entropy.append(ent.squeeze(-1))
+                dones.append(done.squeeze(-1))
 
             # Convert lists to tensors
             log_probs = torch.concat(log_probs, dim=0)
             values = torch.concat(values, dim=0)
             rewards = torch.concat(rewards, dim=0).detach()
             entropy = torch.concat(entropy, dim=0)
+            dones = torch.concat(dones, dim=0)
 
             # Compute returns using λ-return (generalized advantage estimation - GAE)
             gamma, lambda_ = self.flags.im_gamma, self.flags.im_lambda #0.99, 0.95
@@ -434,21 +437,23 @@ class SModelLearner:
 
             for t in reversed(range(len(rewards))):
                 delta = rewards[t] + gamma * next_value - values[t]
-                gae = delta + gamma * lambda_ * gae
+                gae = delta + gamma * lambda_ * gae * (1 - dones[t])
                 advantages[t] = gae
                 next_value = values[t]
             returns = advantages + values
 
+            done_mask = torch.cumprod(torch.logical_not(dones))
+            print('done_mask', done_mask)
             # Policy loss: maximize expected return using policy gradient
             # policy_loss = im_weights * is_weights.unsqueeze(0) * log_probs * advantages.detach()
             # print('policy_loss', policy_loss.shape)
-            policy_loss = -(is_weights.unsqueeze(0) * log_probs * advantages.detach()).sum() / len(rewards)
+            policy_loss = -(done_mask * is_weights.unsqueeze(0) * log_probs * advantages.detach()).sum() / len(rewards)
 
             # Value loss: MSE between predicted values and target returns
-            value_loss = ( is_weights.unsqueeze(0) * (values - returns.detach())**2).sum() / len(rewards) #F.mse_loss(values, returns.detach())
+            value_loss = ( done_mask * is_weights.unsqueeze(0) * (values - returns.detach())**2).sum() / len(rewards) #F.mse_loss(values, returns.detach())
 
             # Entropy loss for exploration bonus
-            entropy_loss = -torch.sum( is_weights.unsqueeze(0) * entropy) / len(rewards)
+            entropy_loss = -torch.sum(done_mask * is_weights.unsqueeze(0) * entropy) / len(rewards)
 
             # Total loss (weighted sum of policy, value, and entropy losses)
             loss = policy_loss + self.flags.im_value_cost * value_loss + self.flags.im_entropy_cost * entropy_loss
