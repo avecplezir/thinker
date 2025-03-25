@@ -545,6 +545,8 @@ class SActorLearner:
         log_rhos = augment_w_zero(log_rhos)
         log_rhos = torch.zeros_like(log_rhos)
         # log_rhos = augment_w_neg(log_rhos)
+        # log_rhos = log_rhos.unsqueeze(1).repeat(1, drs_steps)
+        # log_rhos = log_rhos.veiw(drs_steps*T, B)
 
         for i in range(self.num_rewards):
             prefix = self.rewards_ls[i]
