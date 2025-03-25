@@ -539,7 +539,11 @@ class SActorLearner:
         else:
             log_rhos = torch.zeros_like(train_actor_out.c_action_log_prob)
 
-        log_rhos = augment_w_zero(log_rhos)
+        def augment_w_neg(x):
+            return torch.cat([-1000*torch.ones_like(x) for _ in range(drs_steps-1)] + [x], dim=1).view(drs_steps*T, B)
+
+        # log_rhos = augment_w_zero(log_rhos)
+        log_rhos = augment_w_neg(log_rhos)
 
         for i in range(self.num_rewards):
             prefix = self.rewards_ls[i]
