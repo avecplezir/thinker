@@ -486,7 +486,8 @@ class EnvImagination(Env):
         model_net_out = self.model_net.forward_single(
             state=self.state,
             action=action,
-            detach_features=self.detach_features)
+            detach_features=self.detach_features,
+            im_env_forward=True)
 
         self.state = model_net_out.state
 

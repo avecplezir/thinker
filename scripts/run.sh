@@ -19,18 +19,32 @@ source activate /home/mila/i/ivan.anokhin/anaconda3/envs/thinker
 
 export WANDB_USER=irina-rish
 python thinker/train.py \
-              --xpid thinker_onegpu_v4 \
-              --imagination_loss false \
+              --xpid thinker_r10_decdepth4_v4 \
+              --model_warm_up_n 500 \
+              --detach_features false \
+              --img_fea_cos false \
+              --model_decoder_depth 4 \
+              --imagination_loss true \
+              --use_dones_im true \
               --rec_t 10 \
               --use_wandb true
 
 #python thinker/train.py \
-#              --xpid thinker_r10_isweightsonly_dfeatures_sum_v4 \
-#              --model_warm_up_n 10000 \
+#              --xpid thinker_r10_dones_detachsr_v4 \
+#              --model_warm_up_n 500 \
 #              --detach_features false \
 #              --imagination_loss true \
+#              --use_dones_im true \
 #              --rec_t 10 \
 #              --use_wandb true
+
+#python thinker/train.py \
+#              --xpid thinker_onegpu_v4 \
+#              --imagination_loss false \
+#              --rec_t 10 \
+#              --use_wandb true
+
+
 
 #python thinker/train.py --xpid thinker_r10_v3 --model_warm_up_n 10000 --imagination_loss false --rec_t 10 --use_wandb true
 

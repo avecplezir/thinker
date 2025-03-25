@@ -365,7 +365,8 @@ class DynamicModel(nn.Module):
         x = h
         if self.training and not self.disable_half_grad:
             # no half-gradient for dreamer net
-            x.register_hook(lambda grad: grad * 0.5)
+            # x.register_hook(lambda grad: grad * 0.5)
+            pass
         if not self.oned_input:
             actions = (
                 actions.unsqueeze(-1).unsqueeze(-1).tile([1, 1, x.shape[2], x.shape[3]])
@@ -1164,7 +1165,7 @@ class ModelNet(BaseNet):
 
         return self._prepare_out(sr_net_out, vp_net_out, new_state, full_xs)
 
-    def forward_single(self, state, action, future_x=None, training=False, detach_features=False):
+    def forward_single(self, state, action, future_x=None, training=False, detach_features=False, im_env_forward=False):
         """
         One-step transition from z_t, h_t, a_t to predicted z_{t+1}, h_{t+1}, r_{t+1}, v_{t+1}, pi_{t+1}
         Args:
@@ -1181,6 +1182,10 @@ class ModelNet(BaseNet):
             state_.update(sr_net_out.state)
         else:
             x = None
+
+        if im_env_forward:
+            x = x.detach()
+
         vp_net_out = self.vp_net.forward_single(
             action=action, state=state, x=x, detach_features=detach_features,
         )

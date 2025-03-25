@@ -435,25 +435,29 @@ class SModelLearner:
             gae = 0
             next_value = model_net_out.vs.detach().flatten(0)
 
+            if self.flags.use_dones_im:
+                not_dones = torch.logical_not(dones)
+            else:
+                not_dones = torch.ones_like(dones)
+
             for t in reversed(range(len(rewards))):
                 delta = rewards[t] + gamma * next_value - values[t]
-                gae = delta + gamma * lambda_ * gae * (1 - dones[t])
+                gae = delta + gamma * lambda_ * gae * not_dones[t]
                 advantages[t] = gae
                 next_value = values[t]
             returns = advantages + values
 
-            done_mask = torch.cumprod(torch.logical_not(dones))
-            print('done_mask', done_mask)
+            not_dones_mask = torch.cumprod(not_dones, 0)
             # Policy loss: maximize expected return using policy gradient
             # policy_loss = im_weights * is_weights.unsqueeze(0) * log_probs * advantages.detach()
             # print('policy_loss', policy_loss.shape)
-            policy_loss = -(done_mask * is_weights.unsqueeze(0) * log_probs * advantages.detach()).sum() / len(rewards)
+            policy_loss = -(not_dones_mask * is_weights.unsqueeze(0) * log_probs * advantages.detach()).sum() / len(rewards)
 
             # Value loss: MSE between predicted values and target returns
-            value_loss = ( done_mask * is_weights.unsqueeze(0) * (values - returns.detach())**2).sum() / len(rewards) #F.mse_loss(values, returns.detach())
+            value_loss = (not_dones_mask * is_weights.unsqueeze(0) * (values - returns.detach())**2).sum() / len(rewards) #F.mse_loss(values, returns.detach())
 
             # Entropy loss for exploration bonus
-            entropy_loss = -torch.sum(done_mask * is_weights.unsqueeze(0) * entropy) / len(rewards)
+            entropy_loss = -torch.sum(not_dones_mask * is_weights.unsqueeze(0) * entropy) / len(rewards)
 
             # Total loss (weighted sum of policy, value, and entropy losses)
             loss = policy_loss + self.flags.im_value_cost * value_loss + self.flags.im_entropy_cost * entropy_loss
