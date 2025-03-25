@@ -63,6 +63,7 @@ enc_1d_hs: 256 # hidden size of 1d encoder
 # -rnn setting
 use_latent_action: false # whether to use latent action in rnn
 tran_t: 1 # internal transition step for rnn
+drs_steps: 3 # number of internal steps for drc
 extend_baseline: false # whether to extend baseline with rnn_steps
 tran_mem_n: 40 # memory slot size for the attention module in lstm-attn
 tran_layer_n: 3 # number of layers of lstm-attn

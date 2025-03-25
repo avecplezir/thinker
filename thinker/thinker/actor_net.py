@@ -1021,34 +1021,6 @@ class DRCNet(ActorBaseNet):
             pool_inject=True,
         )
 
-        if flags.use_predictor:
-            if flags.predictor_acchitecture == 'simple':
-                self.predictor = nn.Sequential(
-                    nn.ReLU(),
-                    nn.Conv2d(
-                        in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
-                    ),
-                    nn.ReLU(),
-                    nn.Conv2d(
-                        in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, stride=1, padding=1
-                    ),
-                )
-            elif flags.predictor_acchitecture == 'lstm':
-                self.predictor = ConvAttnLSTM(
-                    input_dim=hidden_dim,
-                    hidden_dim=hidden_dim,
-                    num_layers=self.flags.n_pred_layers,
-                    attn=False,
-                    h=h,
-                    w=w,
-                    kernel_size=3,
-                    mem_n=None,
-                    num_heads=8,
-                    attn_mask_b=None,
-                    tran_t=flags.tran_t,
-                    pool_inject=True,
-                )
-
         last_out_size = hidden_dim * h * w * 2
         if flags.use_prediction_for_actor:
             last_out_size += hidden_dim * h * w
@@ -1061,10 +1033,7 @@ class DRCNet(ActorBaseNet):
             self.register_buffer("kl_beta", kl_beta)
 
     def initial_state(self, batch_size, device=None):
-        if self.flags.use_predictor and self.flags.predictor_acchitecture == 'lstm':
-            return self.core.initial_state(batch_size, device=device) + self.core.initial_state(batch_size, device=device)
-        else:
-            return self.core.initial_state(batch_size, device=device)
+        return self.core.initial_state(batch_size, device=device)
 
     def latent_action_policy(self, x):
         latent_action_logits = self.latent_policy(x)
@@ -1085,13 +1054,13 @@ class DRCNet(ActorBaseNet):
         core_input = x_enc.view(*((T, B) + x_enc.shape[1:]))
 
         latent_baselines = []
-        for lstm_interation in range(3):
+        for lstm_interation in range(self.flags.drs_steps):
             if self.flags.use_latent_action:
                 latent_action_emb, c_action_log_prob = self.latent_action_policy(core_input)
                 core_input = torch.cat([core_input, latent_action_emb], dim=1)
                 c_action_log_prob = c_action_log_prob.view(T, B)
 
-            core_input, core_state = self.core(core_input, done, core_state[:2*self.num_layers], record_state=self.record_state)
+            core_input, core_state = self.core(core_input, done, core_state, record_state=self.record_state)
 
             if self.record_state: self.hidden_state = self.core.hidden_state
             core_output = torch.flatten(core_input, 0, 1)

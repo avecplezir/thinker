@@ -492,21 +492,24 @@ class SActorLearner:
         # Take final value function slice for bootstrapping.
         if not self.ppo_enable:
             bootstrap_value = new_actor_out.baseline[-1, :, -1]
+            print('bootstrap_value', bootstrap_value.shape)
+
         else:
             bootstrap_value = train_actor_out.baseline[-1, :, -1]
 
         # Move from obs[t] -> action[t] to action[t] -> obs[t].
+        drs_steps = self.flags.drs_steps
         train_actor_out = util.tuple_map(train_actor_out, lambda x: x[1:])
         new_actor_out = util.tuple_map(new_actor_out, lambda x: x[:-1])
 
-        new_actor_out_baseline = new_actor_out.baseline.permute(0, 2, 1, 3).reshape(3*T, B, 1)
-        train_actor_out_baseline = train_actor_out.baseline.permute(0, 2, 1, 3).reshape(3*T, B, 1)
+        new_actor_out_baseline = new_actor_out.baseline.permute(0, 2, 1, 3).reshape(drs_steps*T, B, 1)
+        train_actor_out_baseline = train_actor_out.baseline.permute(0, 2, 1, 3).reshape(drs_steps*T, B, 1)
 
         rewards = train_actor_out.reward
         # print('rewards', rewards[:, 0])
 
         def augment_w_zero(x):
-            return torch.cat([torch.zeros_like(x), torch.zeros_like(x), x], dim=1).view(3*T, B)
+            return torch.cat([torch.zeros_like(x) for _ in range(drs_steps-1)] [x], dim=1).view(drs_steps*T, B)
 
         rewards = augment_w_zero(rewards).unsqueeze(-1)
         # print('rewards 2', rewards[2::3, 0])
@@ -562,7 +565,7 @@ class SActorLearner:
                 lamb=self.flags.v_trace_lamb,
             )                
             self.norm_stats[i] = v_trace.norm_stat
-            if self.ppo_enable:                
+            if self.ppo_enable:
                 log_is_de = train_actor_out.c_action_log_prob
                 adv = v_trace.pg_advantages_nois.detach()
                 log_is_de = log_is_de.detach()
@@ -570,11 +573,11 @@ class SActorLearner:
 
             if not self.ppo_enable:
                 adv = v_trace.pg_advantages.detach()
-                adv = adv[2::3]
+                adv = adv[drs_steps-1::drs_steps]
                 pg_loss = -adv * new_actor_out.c_action_log_prob
-            else:                
+            else:
                 log_is = new_actor_out.c_action_log_prob - log_is_de
-                unclipped_is = torch.exp(log_is) 
+                unclipped_is = torch.exp(log_is)
                 self.ppo_is_abs.append(torch.mean(torch.abs(unclipped_is-1)).detach().item())
                 clipped_is = torch.clamp(unclipped_is, 1-self.flags.ppo_clip, 1+self.flags.ppo_clip)
                 pg_loss = -torch.minimum(unclipped_is * adv, clipped_is * adv)
@@ -586,8 +589,8 @@ class SActorLearner:
             pg_losses.append(pg_loss)
             if self.flags.critic_enc_type == 0:
                 if self.flags.extend_baseline:
-                    target_baseline = new_actor_out_baseline[2::3, :, i]
-                    vs_reduced = vs[2::3]
+                    target_baseline = new_actor_out_baseline[drs_steps-1::drs_steps, :, i]
+                    vs_reduced = vs[drs_steps-1::drs_steps]
                 else:
                     target_baseline = new_actor_out_baseline[:, :, i]
                     vs_reduced = vs
@@ -610,7 +613,7 @@ class SActorLearner:
         # sum all the losses
         total_loss = pg_losses[0] / self.actor_net.dim_actions
         if self.flags.extend_baseline:
-            total_loss += self.flags.baseline_cost * baseline_losses[0] / 3
+            total_loss += self.flags.baseline_cost * baseline_losses[0] / drs_steps
         else:
             total_loss += self.flags.baseline_cost * baseline_losses[0]
 
@@ -665,10 +668,6 @@ class SActorLearner:
         losses["reg_loss"] = reg_loss
         total_loss += self.flags.reg_cost * reg_loss
 
-        if self.flags.use_predictor:
-            losses['pred_core_loss'] = pred_core_output_loss
-            total_loss += self.flags.predictor_cost * pred_core_output_loss
-
         if self.ppo_enable:
             if self.actor_net.discrete_action:
                 tar_pri_log_prob = F.log_softmax(base_pri_logits, dim=-1)
@@ -677,24 +676,24 @@ class SActorLearner:
                 pri_kl_loss = torch.sum(pri_kl_loss, dim=-1)
             else:
                 pri_kl_loss = guassian_kl_div(
-                    base_pri_mean, 
+                    base_pri_mean,
                     base_pri_log_var,
                     new_actor_out.pri_param[:, :, :, 0],
                     new_actor_out.pri_param[:, :, :, 1]
-                )            
+                )
             pri_kl_loss = torch.sum(pri_kl_loss)
             kl_loss = pri_kl_loss
 
-            if not self.disable_thinker:                
+            if not self.disable_thinker:
                 tar_reset_log_prob = F.log_softmax(base_reset_logits, dim=-1)
                 reset_log_prob = F.log_softmax(new_actor_out.reset_logits, dim=-1)
                 reset_kl_loss = F.kl_div(reset_log_prob, tar_reset_log_prob, reduction="sum", log_target=True)
                 kl_loss += reset_kl_loss
 
             if self.flags.ppo_kl_coef > 0.:
-                total_loss += self.flags.ppo_kl_coef * self.actor_net.kl_beta * kl_loss         
-                avg_kl_loss = kl_loss / T / B  
-                if last_iter:                
+                total_loss += self.flags.ppo_kl_coef * self.actor_net.kl_beta * kl_loss
+                avg_kl_loss = kl_loss / T / B
+                if last_iter:
                     if avg_kl_loss < self.flags.ppo_kl_targ / 1.5:
                         self.actor_net.kl_beta /= 2
                     elif avg_kl_loss > self.flags.ppo_kl_targ * 1.5:
@@ -703,7 +702,7 @@ class SActorLearner:
                     if avg_kl_loss > self.flags.ppo_kl_targ:
                         self.ppo_early_stop = True
                 self.actor_net.kl_beta = torch.clamp(self.actor_net.kl_beta, 1e-6, 1e3)
-            self.kl_losses.append(kl_loss.item())            
+            self.kl_losses.append(kl_loss.item())
             losses["kl_loss"] = np.mean(self.kl_losses)
         losses["total_loss"] = total_loss
 
