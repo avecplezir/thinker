@@ -1054,11 +1054,14 @@ class DRCNet(ActorBaseNet):
         core_input = x_enc.view(*((T, B) + x_enc.shape[1:]))
 
         latent_baselines = []
+        c_latent_action_log_prob = []
+
         for lstm_interation in range(self.flags.drs_steps):
             if self.flags.use_latent_action:
-                latent_action_emb, c_action_log_prob = self.latent_action_policy(core_input)
+                latent_action_emb, c_latent_action_log_prob = self.latent_action_policy(core_input)
                 core_input = torch.cat([core_input, latent_action_emb], dim=1)
-                c_action_log_prob = c_action_log_prob.view(T, B)
+                c_latent_action_log_prob = c_latent_action_log_prob.view(T, B)
+                c_latent_action_log_prob.append(c_latent_action_log_prob)
 
             core_input, core_state = self.core(core_input, done, core_state, record_state=self.record_state)
 
@@ -1071,6 +1074,9 @@ class DRCNet(ActorBaseNet):
 
             latent_baseline = self.baseline(final_out).view(T, B, 1)
             latent_baselines.append(latent_baseline)
+
+        if self.flags.use_latent_action:
+            c_latent_action_log_prob = torch.stack(c_latent_action_log_prob, dim=2)
 
         baseline = torch.stack(latent_baselines, dim=2)
         pri_logits = self.policy(final_out)
@@ -1123,7 +1129,7 @@ class DRCNet(ActorBaseNet):
             action_prob=action_prob,
             c_action_log_prob=c_action_log_prob,            
             baseline=baseline,
-            baseline_enc=None,
+            baseline_enc=c_latent_action_log_prob,
             entropy_loss=entropy_loss,
             reg_loss=reg_loss,
             pred_core_output=None,

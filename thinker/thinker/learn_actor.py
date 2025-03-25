@@ -488,12 +488,9 @@ class SActorLearner:
             compute_loss = True,
         )
 
-
         # Take final value function slice for bootstrapping.
         if not self.ppo_enable:
             bootstrap_value = new_actor_out.baseline[-1, :, -1]
-            print('bootstrap_value', bootstrap_value.shape)
-
         else:
             bootstrap_value = train_actor_out.baseline[-1, :, -1]
 
@@ -505,14 +502,16 @@ class SActorLearner:
         new_actor_out_baseline = new_actor_out.baseline.permute(0, 2, 1, 3).reshape(drs_steps*T, B, 1)
         train_actor_out_baseline = train_actor_out.baseline.permute(0, 2, 1, 3).reshape(drs_steps*T, B, 1)
 
+        # print('new_actor_out_baseline', new_actor_out_baseline.shape, new_actor_out_baseline[drs_steps-1::drs_steps, 0, :5])
+        # print('baseline_enc', new_actor_out.baseline_enc.shape, new_actor_out.baseline_enc[:, 0, :5])
         rewards = train_actor_out.reward
         # print('rewards', rewards[:, 0])
 
         def augment_w_zero(x):
-            return torch.cat([torch.zeros_like(x) for _ in range(drs_steps-1)] [x], dim=1).view(drs_steps*T, B)
+            return torch.cat([torch.zeros_like(x) for _ in range(drs_steps-1)] + [x], dim=1).view(drs_steps*T, B)
 
         rewards = augment_w_zero(rewards).unsqueeze(-1)
-        # print('rewards 2', rewards[2::3, 0])
+        # print('rewards 2', rewards[drs_steps-1::drs_steps, 0])
         # print('rewards 3', rewards[:, 0])
 
         # compute advantage and baseline        
