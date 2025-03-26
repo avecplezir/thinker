@@ -287,17 +287,19 @@ class SModelLearner:
             losses_m = {}
             total_norm_m = torch.zeros(1, device=self.device)
             pred_xs = None
-        with autocast(enabled=self.flags.float16):
-            losses_p, priorities = self.compute_losses_p(
-                train_model_out, target, is_weights, pred_xs
+
+        if self.flags.vp_loss:
+            with autocast(enabled=self.flags.float16):
+                losses_p, priorities = self.compute_losses_p(
+                    train_model_out, target, is_weights, pred_xs
+                )
+            if self.timing is not None:
+                self.timing.time("compute_losses_p")
+            total_norm_p = self.gradient_step(
+                losses_p["total_loss_p"], self.optimizer_p, self.scheduler_p, self.scaler_p
             )
-        if self.timing is not None:
-            self.timing.time("compute_losses_p")
-        total_norm_p = self.gradient_step(
-            losses_p["total_loss_p"], self.optimizer_p, self.scheduler_p, self.scaler_p
-        )
-        if self.timing is not None:
-            self.timing.time("gradient_step_p")
+            if self.timing is not None:
+                self.timing.time("gradient_step_p")
 
         if self.flags.imagination_loss:
             with autocast(enabled=self.flags.float16):
@@ -316,7 +318,8 @@ class SModelLearner:
         if self.timing is not None:
             self.timing.time("update_priority")
         losses = losses_m
-        losses.update(losses_p)
+        if self.flags.vp_loss:
+            losses.update(losses_p)
         if self.flags.imagination_loss:
             losses.update(losses_im)
         # print statistics
@@ -570,11 +573,15 @@ class SModelLearner:
         else:
             img_loss = None
         if self.flags.model_fea_loss_cost > 0.:
+            print('target_xs', target_xs.shape)
             with torch.no_grad():                
                 target_enc = self.model_net.vp_net.encoder.forward_pre_mem(
                     target_xs, action, flatten=True, depth=self.flags.model_decoder_depth
                 )
+                print('target_enc', target_enc.shape)
             pred_enc = self.model_net.vp_net.encoder.forward_pre_mem(out.xs, action, flatten=True, depth=self.flags.model_decoder_depth)
+            print('out.xs', out.xs.shape)
+            print('pred_enc', pred_enc.shape)
             fea_loss = self.compute_state_loss(target_enc, pred_enc, target["done_mask"][1:], is_weights, self.flags.img_fea_cos)
         else:
             fea_loss = None        

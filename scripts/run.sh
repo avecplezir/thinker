@@ -17,10 +17,21 @@ source activate /home/mila/i/ivan.anokhin/anaconda3/envs/thinker
 
 #python thinker/train.py --xpid thinkerv2 --model_warm_up_n 500 --rec_t 10 --imagination_loss true --use_wandb false
 
+#"thinker/train.py --xpid thinker_r10_decdepth4_v4
+#--model_warm_up_n 500 --detach_features false --img_fea_cos false
+#--model_decoder_depth 4 --imagination_loss true --use_dones_im true --rec_t 10 --use_wandb true"
+
+#model_policy_loss_cost: 0.5 # cost for training model's policy
+#model_vs_loss_cost: 0.25 # cost for training model's values
+#model_rs_loss_cost: 1.0 # cost for training model's reward
+
 export WANDB_USER=irina-rish
 python thinker/train.py \
-              --xpid thinker_r10_decdepth4_v4 \
-              --model_warm_up_n 500 \
+              --xpid thinker_r10_im_decdepth4_nodistillloss_v5 \
+              --model_warm_up_n 10000 \
+              --vp_loss false \
+              --model_policy_loss_cost 0 \
+              --model_vs_loss_cost 0 \
               --detach_features false \
               --img_fea_cos false \
               --model_decoder_depth 4 \
@@ -28,6 +39,43 @@ python thinker/train.py \
               --use_dones_im true \
               --rec_t 10 \
               --use_wandb true
+
+#python thinker/train.py \
+#              --xpid thinker_r10_im_decdepth4_nocos_v5 \
+#              --model_warm_up_n 10000 \
+#              --detach_features false \
+#              --img_fea_cos false \
+#              --model_decoder_depth 4 \
+#              --imagination_loss true \
+#              --use_dones_im true \
+#              --rec_t 10 \
+#              --use_wandb true
+
+#python thinker/train.py \
+#              --xpid thinker_r10_decdepth4_noim_nocos_v4 \
+#              --model_warm_up_n 10000 \
+#              --detach_features false \
+#              --img_fea_cos false \
+#              --model_decoder_depth 3 \
+#              --imagination_loss false \
+#              --use_dones_im true \
+#              --rec_t 10 \
+#              --use_wandb true
+
+#python thinker/train.py \
+#              --xpid thinker_r10_imloss_v5 \
+#              --model_warm_up_n 500 \
+#              --model_img_loss_cost 0 \
+#              --model_fea_loss_cost 10 \
+#              --detach_features true \
+#              --img_fea_cos false \
+#              --imagination_loss true \
+#              --use_dones_im true \
+#              --rec_t 10 \
+#              --use_wandb true
+
+
+
 
 #python thinker/train.py \
 #              --xpid thinker_r10_dones_detachsr_v4 \
