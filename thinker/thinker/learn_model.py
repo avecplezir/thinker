@@ -306,7 +306,7 @@ class SModelLearner:
                 losses_im = self.compute_losses_im(train_model_out, is_weights)
             if self.timing is not None:
                 self.timing.time("compute_losses_im")
-            total_norm_im = self.gradient_step(
+            total_norm_p = self.gradient_step(
                 losses_im["total_loss_im"], self.optimizer_p, self.scheduler_p, self.scaler_p
             )
         if self.flags.priority_alpha > 0:
@@ -395,17 +395,13 @@ class SModelLearner:
         Computes Dreamer-style losses using policy gradient for values and policy.
         """
         # Reset the imagination environment
-        print('computing losses im')
-        print('train_model_out.real_state', train_model_out.real_state.shape)
-
         total_loss = 0
         unroll_steps_im = 5
-        print('is_weights', is_weights.shape)
-        print('train_model_out.real_state.shape[0]', train_model_out.real_state.shape[0])
         # discount = self.flags.im_gamma * torch.ones(train_model_out.real_state.shape[0], device=self.device).to(is_weights.device)
         # im_weights = torch.cumprod(torch.cat([torch.ones_like(discount[:1]), discount[:unroll_steps_im-1]], 0), 0).detach().unsqueeze(-1)
 
-        for sample_idx in range(train_model_out.real_state.shape[0]):
+        # for sample_idx in range(train_model_out.real_state.shape[0]):
+        for sample_idx in range(1):
             model_net_out = self.im_env.reset(train_model_out.real_state[sample_idx], train_model_out.action[sample_idx])
 
             log_probs, values, rewards, entropy, dones = [], [], [], [], []
@@ -454,23 +450,26 @@ class SModelLearner:
             # Policy loss: maximize expected return using policy gradient
             # policy_loss = im_weights * is_weights.unsqueeze(0) * log_probs * advantages.detach()
             # print('policy_loss', policy_loss.shape)
-            policy_loss = -(not_dones_mask * is_weights.unsqueeze(0) * log_probs * advantages.detach()).sum() / len(rewards)
+            policy_loss = -(not_dones_mask * is_weights.unsqueeze(0) * log_probs * advantages.detach()).sum()
 
             # Value loss: MSE between predicted values and target returns
-            value_loss = (not_dones_mask * is_weights.unsqueeze(0) * (values - returns.detach())**2).sum() / len(rewards) #F.mse_loss(values, returns.detach())
+            value_loss = (not_dones_mask * is_weights.unsqueeze(0) * (values - returns.detach())**2).sum() #F.mse_loss(values, returns.detach())
 
             # Entropy loss for exploration bonus
-            entropy_loss = -torch.sum(not_dones_mask * is_weights.unsqueeze(0) * entropy) / len(rewards)
+            entropy_loss = -torch.sum(not_dones_mask * is_weights.unsqueeze(0) * entropy)
 
             # Total loss (weighted sum of policy, value, and entropy losses)
             loss = policy_loss + self.flags.im_value_cost * value_loss + self.flags.im_entropy_cost * entropy_loss
 
             total_loss += loss
 
+        # total_loss = total_loss / len(rewards)
+
         return {
             "total_loss_im": total_loss,
             "policy_loss_im": policy_loss,
             "value_loss_im": value_loss,
+            "values_im": values.sum(),
             "entropy_loss_im": entropy_loss,
         }
 
@@ -573,15 +572,11 @@ class SModelLearner:
         else:
             img_loss = None
         if self.flags.model_fea_loss_cost > 0.:
-            print('target_xs', target_xs.shape)
-            with torch.no_grad():                
+            with torch.no_grad():
                 target_enc = self.model_net.vp_net.encoder.forward_pre_mem(
                     target_xs, action, flatten=True, depth=self.flags.model_decoder_depth
                 )
-                print('target_enc', target_enc.shape)
             pred_enc = self.model_net.vp_net.encoder.forward_pre_mem(out.xs, action, flatten=True, depth=self.flags.model_decoder_depth)
-            print('out.xs', out.xs.shape)
-            print('pred_enc', pred_enc.shape)
             fea_loss = self.compute_state_loss(target_enc, pred_enc, target["done_mask"][1:], is_weights, self.flags.img_fea_cos)
         else:
             fea_loss = None        

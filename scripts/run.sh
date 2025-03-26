@@ -27,11 +27,12 @@ source activate /home/mila/i/ivan.anokhin/anaconda3/envs/thinker
 
 export WANDB_USER=irina-rish
 python thinker/train.py \
-              --xpid thinker_r10_im_decdepth4_nodistillloss_v5 \
+              --xpid thinker_r10_im_decdepth4_vsdistill01_v6 \
               --model_warm_up_n 10000 \
-              --vp_loss false \
-              --model_policy_loss_cost 0 \
-              --model_vs_loss_cost 0 \
+              --vp_loss true \
+              --model_policy_loss_cost 0. \
+              --model_vs_loss_cost 0.1 \
+              --priority_alpha 0 \
               --detach_features false \
               --img_fea_cos false \
               --model_decoder_depth 4 \
