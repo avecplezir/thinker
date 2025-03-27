@@ -27,19 +27,34 @@ source activate /home/mila/i/ivan.anokhin/anaconda3/envs/thinker
 
 export WANDB_USER=irina-rish
 python thinker/train.py \
-              --xpid thinker_r10_im_decdepth4_vsdistill01_v6 \
-              --model_warm_up_n 10000 \
+              --xpid r10_imcost10_decdepth4_vs01pl0_v1 \
+              --model_warm_up_n 500 \
+              --im_loss_cost 10 \
               --vp_loss true \
+              --num_im_iterations 5 \
               --model_policy_loss_cost 0. \
               --model_vs_loss_cost 0.1 \
-              --priority_alpha 0 \
               --detach_features false \
               --img_fea_cos false \
               --model_decoder_depth 4 \
               --imagination_loss true \
-              --use_dones_im true \
               --rec_t 10 \
               --use_wandb true
+
+#python thinker/train.py \
+#              --xpid thinker_r10_im_decdepth4_vsdistill01_v6 \
+#              --model_warm_up_n 10000 \
+#              --vp_loss true \
+#              --model_policy_loss_cost 0. \
+#              --model_vs_loss_cost 0.1 \
+#              --priority_alpha 0 \
+#              --detach_features false \
+#              --img_fea_cos false \
+#              --model_decoder_depth 4 \
+#              --imagination_loss true \
+#              --use_dones_im true \
+#              --rec_t 10 \
+#              --use_wandb true
 
 #python thinker/train.py \
 #              --xpid thinker_r10_im_decdepth4_nocos_v5 \

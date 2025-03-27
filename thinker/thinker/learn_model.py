@@ -401,7 +401,8 @@ class SModelLearner:
         # im_weights = torch.cumprod(torch.cat([torch.ones_like(discount[:1]), discount[:unroll_steps_im-1]], 0), 0).detach().unsqueeze(-1)
 
         # for sample_idx in range(train_model_out.real_state.shape[0]):
-        for sample_idx in range(1):
+        num_of_iterations = min(self.flags.num_im_iterations, train_model_out.real_state.shape[0])
+        for sample_idx in range(num_of_iterations):
             model_net_out = self.im_env.reset(train_model_out.real_state[sample_idx], train_model_out.action[sample_idx])
 
             log_probs, values, rewards, entropy, dones = [], [], [], [], []
@@ -464,6 +465,7 @@ class SModelLearner:
             total_loss += loss
 
         # total_loss = total_loss / len(rewards)
+        total_loss = self.flags.im_loss_cost * total_loss / num_of_iterations
 
         return {
             "total_loss_im": total_loss,
