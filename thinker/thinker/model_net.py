@@ -10,7 +10,7 @@ import math
 OutNetOut = namedtuple(
     "OutNetOut",
     [
-        "rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits", "policy"
+        "rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits", "policy", "im_policy", "im_vs",
     ],
 )
 SRNetOut = namedtuple(
@@ -20,11 +20,11 @@ SRNetOut = namedtuple(
 VPNetOut = namedtuple(
     "VPNetOut",
     ["rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits",
-        "policy", "hs", "pred_zs", "true_zs", "state",
+        "policy", "hs", "pred_zs", "true_zs", "state", "im_policy", "im_vs",
     ],
 )
 DualNetOut = namedtuple(
-    "DualNetOut", ["rs", "dones", "vs", "v_enc_logits", "policy", "xs", "hs", "zs", "state"]
+    "DualNetOut", ["rs", "dones", "vs", "v_enc_logits", "policy", "xs", "hs", "zs", "state", "im_policy", "im_vs",]
 )
 
 class BaseNet(nn.Module):
@@ -476,6 +476,15 @@ class OutputNet(nn.Module):
                 nn.init.constant_(self.fc_logits.weight, 0.0)
                 nn.init.constant_(self.fc_logits.bias, 0.0)
 
+            if self.im_separate_head:
+                self.fc_logits_im = nn.Linear(fc_in, self.dim_actions*(self.num_actions if self.discrete_action else 2))
+                self.fc_v_im = nn.Linear(fc_in, out_n)
+                if zero_init:
+                    nn.init.constant_(self.fc_v_im.weight, 0.0)
+                    nn.init.constant_(self.fc_v_im.bias, 0.0)
+                    nn.init.constant_(self.fc_logits_im.weight, 0.0)
+                    nn.init.constant_(self.fc_logits_im.bias, 0.0)
+
         if predict_done:
             self.fc_done = nn.Linear(fc_in, 1)
             if zero_init:
@@ -537,6 +546,13 @@ class OutputNet(nn.Module):
                 r = r_out
         else:
             r, r_enc_logit = None, None
+
+        if self.predict_v_pi and self.im_separate_head:
+            im_policy = self._compute_policy(self.fc_logits_im, x_policy)
+            im_v = self.fc_v_im(x_v)
+        else:
+            im_policy, im_v = policy, v
+
         out = OutNetOut(
             rs=r,
             r_enc_logits=r_enc_logit,
@@ -545,6 +561,8 @@ class OutputNet(nn.Module):
             vs=v,
             v_enc_logits=v_enc_logit,
             policy=policy,
+            im_policy=im_policy,
+            im_vs=im_v,
         )
         return out
     
@@ -997,6 +1015,8 @@ class VPNet(nn.Module):
             true_zs=zs,
             pred_zs=pred_zs,
             state=new_state,
+            im_policy=util.safe_concat(outs, "im_policy", 0),
+            im_vs=util.safe_concat(outs, "im_vs", 0),
         )
 
     def forward_single(self, action, state, x=None, one_hot=False, detach_features=False):
@@ -1230,6 +1250,8 @@ class ModelNet(BaseNet):
             hs=hs,
             zs=vp_net_out.pred_zs,
             state=state,
+            im_policy=vp_net_out.im_policy,
+            im_vs=vp_net_out.im_vs,
         )
     
     def compute_vs_loss(self, vs, v_enc_logits, target_vs):

@@ -408,12 +408,12 @@ class SModelLearner:
             log_probs, values, rewards, entropy, dones = [], [], [], [], []
 
             for i in range(unroll_steps_im):
-                im_policy_out = model_net_out.policy #self.model_net.im_policy(model_net_out)
+                im_policy_out = model_net_out.im_policy #self.model_net.im_policy(model_net_out)
                 probs = Categorical(logits=im_policy_out)
                 action = probs.sample()
                 log_prob = probs.log_prob(action)
                 ent = probs.entropy()
-                value = model_net_out.vs
+                value = model_net_out.im_vs
                 model_net_out, reward, done, *_ = self.im_env.step(action.squeeze(0))
 
                 log_probs.append(log_prob.squeeze(-1))
@@ -433,7 +433,7 @@ class SModelLearner:
             gamma, lambda_ = self.flags.im_gamma, self.flags.im_lambda #0.99, 0.95
             advantages = torch.zeros_like(rewards)
             gae = 0
-            next_value = model_net_out.vs.detach().flatten(0)
+            next_value = model_net_out.im_vs.detach().flatten(0)
 
             if self.flags.use_dones_im:
                 not_dones = torch.logical_not(dones)

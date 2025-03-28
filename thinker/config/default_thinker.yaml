@@ -33,9 +33,10 @@ img_fea_cos: true # whether to use cosine similarity loss for img_loss and fea_l
 # model setting
 dual_net: true # whether to use dual network
 vp_loss: true # whether to use value and policy distillation loss
+im_separate_head: false # whether to use separate head for imagination policy and critic
 imagination_loss: false
 im_entropy_cost: 0.0003 # 3e-4 #0.01
-im_value_cost: 0.5
+im_value_cost: 0.5g
 im_gamma: 0.99
 im_lambda: 0.95
 im_loss_cost: 1
