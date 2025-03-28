@@ -429,6 +429,7 @@ class OutputNet(nn.Module):
         predict_r=True,
         predict_done=False,
         ordinal=False,
+        im_separate_head=False,
     ):
         super(OutputNet, self).__init__()
 
@@ -443,7 +444,8 @@ class OutputNet(nn.Module):
         self.predict_v_pi = predict_v_pi
         self.predict_r = predict_r
         self.predict_done = predict_done  
-        self.ordinal = ordinal      
+        self.ordinal = ordinal
+        self.im_separate_head = im_separate_head
 
         assert self.enc_type in [0, 2, 3], "model encoding type can only be 0, 2, 3"
 
@@ -895,6 +897,7 @@ class VPNet(nn.Module):
             predict_r=self.predict_rd,
             predict_done=self.predict_rd and self.flags.model_done_loss_cost > 0.0,
             ordinal=self.flags.model_ordinal,
+            im_separate_head=self.flags.im_separate_head,
         )
 
         if not self.dual_net:
@@ -1057,6 +1060,8 @@ class VPNet(nn.Module):
             true_zs=None,
             pred_zs=util.safe_unsqueeze(pred_z, 0),
             state=new_state,
+            im_policy=util.safe_unsqueeze(out.im_policy, 0),
+            im_vs=util.safe_unsqueeze(out.im_vs, 0),
         )
     
     def compute_z0(self, env_state_norm, done, action, state):
