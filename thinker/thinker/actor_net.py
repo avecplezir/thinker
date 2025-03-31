@@ -1063,24 +1063,33 @@ class DRCNet(ActorBaseNet):
         #     c_latent_action_log_prob = c_latent_action_log_prob.view(T, B)
         #     c_latent_action_log_prob.append(c_latent_action_log_prob)
 
+        # print('core_input', core_input.shape)
+        # print('core_state', core_state.shape)
         core_input, core_state = self.core(core_input, done, core_state, record_state=self.record_state)
 
         if self.record_state: self.hidden_state = self.core.hidden_state
         core_output = torch.flatten(core_input, 0, 1)
 
+        # print('x_enc', x_enc.shape)
+        x_enc = x_enc.unsqueeze(1).repeat(1, self.flags.tran_t, 1, 1, 1)
+        x_enc = x_enc.view(T*self.flags.tran_t*B, x_enc.shape[2], x_enc.shape[3], x_enc.shape[4])
+        # print('x_enc 2', x_enc.shape)
+        # print('core_output', core_output.shape)
         core_output = torch.cat([x_enc, core_output], dim=1)
         core_output = torch.flatten(core_output, 1)
         final_out_full = F.relu(self.final_layer(core_output))
-        print('final_out_full', final_out_full.shape)
+        # print('final_out_full', final_out_full.shape)
+
+        baseline = self.baseline(final_out_full).view(self.flags.tran_t*T, B, 1)
+        # print('baseline', baseline.shape)
 
         final_out = final_out_full[self.flags.tran_t-1::self.flags.tran_t]
-        print('final_out', final_out.shape)
+        # print('final_out', final_out.shape)
         # latent_baseline = self.baseline(final_out).view(self.flags.tran_t * T, B, 1)
 
         if self.flags.use_latent_action:
             c_latent_action_log_prob = torch.stack(c_latent_action_log_prob, dim=2)
 
-        baseline = torch.stack(latent_baselines, dim=2)
         pri_logits = self.policy(final_out)
         pri_logits = pri_logits.view(T*B, self.dim_actions, self.num_actions)
 

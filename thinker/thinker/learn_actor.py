@@ -490,17 +490,18 @@ class SActorLearner:
 
         # Take final value function slice for bootstrapping.
         if not self.ppo_enable:
-            bootstrap_value = new_actor_out.baseline[-1, :, -1]
+            bootstrap_value = new_actor_out.baseline[-1]
         else:
-            bootstrap_value = train_actor_out.baseline[-1, :, -1]
+            bootstrap_value = train_actor_out.baseline[-1]
 
         # Move from obs[t] -> action[t] to action[t] -> obs[t].
-        drs_steps = self.flags.drs_steps
+        drs_steps = self.flags.tran_t
+
+        new_actor_out_baseline = new_actor_out.baseline[drs_steps:]
+        train_actor_out_baseline = train_actor_out.baseline[:-drs_steps]
+
         train_actor_out = util.tuple_map(train_actor_out, lambda x: x[1:])
         new_actor_out = util.tuple_map(new_actor_out, lambda x: x[:-1])
-
-        new_actor_out_baseline = new_actor_out.baseline.permute(0, 2, 1, 3).reshape(drs_steps*T, B, 1)
-        train_actor_out_baseline = train_actor_out.baseline.permute(0, 2, 1, 3).reshape(drs_steps*T, B, 1)
 
         # print('new_actor_out_baseline', new_actor_out_baseline.shape, new_actor_out_baseline[drs_steps-1::drs_steps, 0, :5])
         # print('baseline_enc', new_actor_out.baseline_enc.shape, new_actor_out.baseline_enc[:, 0, :5])
