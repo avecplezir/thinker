@@ -18,6 +18,7 @@ source activate /home/mila/i/ivan.anokhin/anaconda3/envs/openrlhf
 
 MAX_JOBS=4 pip install flash-attn==2.7.0.post2 --no-cache-dir --no-build-isolation
 
+salloc -c 4 --gres=gpu --mem=15G --time=4:00:00 --partition=main
 
 salloc -c 4 --gres=gpu:a100:1 --mem=15G --time=2:00:00 --partition=long
 

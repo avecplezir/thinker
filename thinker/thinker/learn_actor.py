@@ -535,7 +535,6 @@ class SActorLearner:
 
         if not self.ppo_enable or self.flags.ppo_v_trace:
             log_rhos = new_actor_out.c_action_log_prob - train_actor_out.c_action_log_prob
-            # print('log_rhos', log_rhos[:, 0])
         else:
             log_rhos = torch.zeros_like(train_actor_out.c_action_log_prob)
 
@@ -595,7 +594,7 @@ class SActorLearner:
             vs = v_trace.vs if not self.ppo_enable else vs
             pg_losses.append(pg_loss)
             if self.flags.critic_enc_type == 0:
-                if self.flags.extend_baseline:
+                if not self.flags.extend_baseline:
                     target_baseline = new_actor_out_baseline[drs_steps-1::drs_steps, :, i]
                     vs_reduced = vs[drs_steps-1::drs_steps]
                 else:
