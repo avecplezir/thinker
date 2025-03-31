@@ -1039,8 +1039,7 @@ class DRCNet(ActorBaseNet):
         latent_action_logits = self.latent_policy(x)
         latent_action = sample(latent_action_logits, greedy=False, dim=-1)
         latent_action_emb = self.action_emb(latent_action)
-        c_action_log_prob = compute_discrete_log_prob(latent_action_logits, latent_action)
-        return latent_action_emb, c_action_log_prob
+        return latent_action_emb, latent_action_logits
 
     def forward(self, env_out, core_state=(), clamp_action=None, compute_loss=False, greedy=False):
         done = env_out.done
@@ -1058,9 +1057,9 @@ class DRCNet(ActorBaseNet):
 
         # for lstm_interation in range(self.flags.drs_steps):
         # if self.flags.use_latent_action:
-        #     latent_action_emb, c_latent_action_log_prob = self.latent_action_policy(core_input)
+        #     latent_action_emb, latent_action_logits = self.latent_action_policy(core_input)
         #     core_input = torch.cat([core_input, latent_action_emb], dim=1)
-        #     c_latent_action_log_prob = c_latent_action_log_prob.view(T, B)
+        #     latent_action_logits = latent_action_logits.view(T, B)
         #     c_latent_action_log_prob.append(c_latent_action_log_prob)
 
         # print('core_input', core_input.shape)
@@ -1112,6 +1111,9 @@ class DRCNet(ActorBaseNet):
         # clamp the action to clamp_action
         if clamp_action is not None:
             pri[:clamp_action.shape[0]] = clamp_action
+
+        # if latent_clamp_action is not None:
+        #     c_action_log_prob = compute_discrete_log_prob(latent_action_logits, latent_action)
 
         # compute chosen log porb
         c_action_log_prob = compute_discrete_log_prob(pri_logits, pri)    

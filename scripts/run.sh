@@ -32,8 +32,8 @@ export WANDB_USER=irina-rish
 #                --use_wandb true
 
 python thinker/train.py --drc true \
-                --xpid drc_tran_t1_default_v4 \
-                --tran_t 2 \
+                --xpid drc_tran_t3_default_v2 \
+                --tran_t 3 \
                 --use_repetition true \
                 --extend_baseline false \
                 --actor_unroll_len 20 \
