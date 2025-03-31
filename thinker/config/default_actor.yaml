@@ -65,6 +65,7 @@ use_latent_action: false # whether to use latent action in rnn
 tran_t: 1 # internal transition step for rnn
 drs_steps: 3 # number of internal steps for drc
 extend_baseline: false # whether to extend baseline with rnn_steps
+use_repetition: false # whether to repeat the same value as a target for rrn steps
 tran_mem_n: 40 # memory slot size for the attention module in lstm-attn
 tran_layer_n: 3 # number of layers of lstm-attn
 tran_head_n: 8 # number of head for each attention layer

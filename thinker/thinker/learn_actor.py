@@ -505,12 +505,12 @@ class SActorLearner:
         # print('new_actor_out_baseline', new_actor_out_baseline.shape, new_actor_out_baseline[drs_steps-1::drs_steps, 0, :5])
         # print('baseline_enc', new_actor_out.baseline_enc.shape, new_actor_out.baseline_enc[:, 0, :5])
         rewards = train_actor_out.reward
-        # print('rewards', rewards[:, 0])
 
         def augment_w_zero(x):
             return torch.cat([torch.zeros_like(x) for _ in range(drs_steps-1)] + [x], dim=1).view(drs_steps*T, B)
 
-        rewards = augment_w_zero(rewards).unsqueeze(-1)
+        if not self.flags.use_repetition:
+            rewards = augment_w_zero(rewards).unsqueeze(-1)
         # print('rewards 2', rewards[drs_steps-1::drs_steps, 0])
         # print('rewards 3', rewards[:, 0])
 
@@ -518,7 +518,8 @@ class SActorLearner:
         pg_losses = []
         baseline_losses = []
         done = train_actor_out.done | train_actor_out.truncated_done
-        done = augment_w_zero(done)
+        if not self.flags.use_repetition:
+            done = augment_w_zero(done)
 
         discounts = [(~done).float() * self.im_discounting]
         masks = [None]
@@ -541,7 +542,8 @@ class SActorLearner:
         def augment_w_repeat(x):
             return torch.cat([x for _ in range(drs_steps)], dim=1).view(drs_steps*T, B)
 
-        log_rhos = augment_w_repeat(log_rhos)
+        if not self.flags.use_repetition:
+            log_rhos = augment_w_repeat(log_rhos)
         # log_rhos = augment_w_zero(log_rhos)
         # log_rhos = torch.zeros_like(log_rhos)
         # log_rhos = augment_w_neg(log_rhos)
@@ -560,6 +562,10 @@ class SActorLearner:
                 values = new_actor_out_baseline[:, :, i]
             else:
                 values = train_actor_out_baseline[:, :, i]
+
+            if self.flags.use_repetition:
+                values = values[drs_steps-1::drs_steps]
+
             v_trace = compute_v_trace(
                 log_rhos=log_rhos,
                 discounts=discounts[i],
@@ -579,7 +585,8 @@ class SActorLearner:
 
             if not self.ppo_enable:
                 adv = v_trace.pg_advantages.detach()
-                adv = adv[drs_steps-1::drs_steps]
+                if not self.flags.use_repetition:
+                    adv = adv[drs_steps-1::drs_steps]
                 pg_loss = -adv * new_actor_out.c_action_log_prob
             else:
                 log_is = new_actor_out.c_action_log_prob - log_is_de
@@ -594,18 +601,28 @@ class SActorLearner:
             vs = v_trace.vs if not self.ppo_enable else vs
             pg_losses.append(pg_loss)
             if self.flags.critic_enc_type == 0:
-                if not self.flags.extend_baseline:
-                    target_baseline = new_actor_out_baseline[drs_steps-1::drs_steps, :, i]
-                    vs_reduced = vs[drs_steps-1::drs_steps]
-                else:
-                    target_baseline = new_actor_out_baseline[:, :, i]
-                    vs_reduced = vs
+                # if not self.flags.extend_baseline:
+                #     target_baseline = new_actor_out_baseline[drs_steps-1::drs_steps, :, i]
+                #     vs_reduced = vs[drs_steps-1::drs_steps]
+                # else:
+                #     if not self.flags.use_repetition:
+                #         target_baseline = new_actor_out_baseline[:, :, i]
+                #         vs_reduced = vs
+                #     else:
+                #         target_baseline = new_actor_out_baseline[:, :, i]
+                #         vs_reduced = augment_w_repeat(vs)
+                target_baseline = new_actor_out_baseline[drs_steps - 1::drs_steps, :, i]
+                vs_reduced = vs
+
+                # print('target_baseline', target_baseline.shape)
+                # print('vs_reduced', vs_reduced.shape)
                 baseline_loss = compute_baseline_loss(
                     baseline=target_baseline,
                     target_baseline=vs_reduced,
                     mask=masks[i]
                 )
             else:
+
                 baseline_loss = compute_baseline_enc_loss(
                     baseline_enc=new_actor_out.baseline_enc[:, :, i],
                     target_baseline=vs,

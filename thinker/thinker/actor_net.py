@@ -1017,7 +1017,7 @@ class DRCNet(ActorBaseNet):
             mem_n=None,            
             num_heads=8,            
             attn_mask_b=None,
-            tran_t=1,
+            tran_t=flags.tran_t,
             pool_inject=True,
         )
 
@@ -1056,24 +1056,26 @@ class DRCNet(ActorBaseNet):
         latent_baselines = []
         c_latent_action_log_prob = []
 
-        for lstm_interation in range(self.flags.drs_steps):
-            if self.flags.use_latent_action:
-                latent_action_emb, c_latent_action_log_prob = self.latent_action_policy(core_input)
-                core_input = torch.cat([core_input, latent_action_emb], dim=1)
-                c_latent_action_log_prob = c_latent_action_log_prob.view(T, B)
-                c_latent_action_log_prob.append(c_latent_action_log_prob)
+        # for lstm_interation in range(self.flags.drs_steps):
+        # if self.flags.use_latent_action:
+        #     latent_action_emb, c_latent_action_log_prob = self.latent_action_policy(core_input)
+        #     core_input = torch.cat([core_input, latent_action_emb], dim=1)
+        #     c_latent_action_log_prob = c_latent_action_log_prob.view(T, B)
+        #     c_latent_action_log_prob.append(c_latent_action_log_prob)
 
-            core_input, core_state = self.core(core_input, done, core_state, record_state=self.record_state)
+        core_input, core_state = self.core(core_input, done, core_state, record_state=self.record_state)
 
-            if self.record_state: self.hidden_state = self.core.hidden_state
-            core_output = torch.flatten(core_input, 0, 1)
+        if self.record_state: self.hidden_state = self.core.hidden_state
+        core_output = torch.flatten(core_input, 0, 1)
 
-            core_output = torch.cat([x_enc, core_output], dim=1)
-            core_output = torch.flatten(core_output, 1)
-            final_out = F.relu(self.final_layer(core_output))
+        core_output = torch.cat([x_enc, core_output], dim=1)
+        core_output = torch.flatten(core_output, 1)
+        final_out_full = F.relu(self.final_layer(core_output))
+        print('final_out_full', final_out_full.shape)
 
-            latent_baseline = self.baseline(final_out).view(T, B, 1)
-            latent_baselines.append(latent_baseline)
+        final_out = final_out_full[self.flags.tran_t-1::self.flags.tran_t]
+        print('final_out', final_out.shape)
+        # latent_baseline = self.baseline(final_out).view(self.flags.tran_t * T, B, 1)
 
         if self.flags.use_latent_action:
             c_latent_action_log_prob = torch.stack(c_latent_action_log_prob, dim=2)

@@ -16,10 +16,11 @@ source activate /home/mila/i/ivan.anokhin/anaconda3/envs/thinker
 export WANDB_USER=irina-rish
 
 python thinker/train.py --drc true \
-                --xpid drc_drcsteps2_repeat_ext_v1 \
+                --xpid drc_drcsteps3_default_v4 \
                 --tran_t 1 \
-                --drs_steps 2 \
-                --extend_baseline true \
+                --drs_steps 3 \
+                --use_repetition true \
+                --extend_baseline false \
                 --actor_unroll_len 20 \
                 --reg_cost 0.01 \
                 --actor_learning_rate 4e-4 \
@@ -29,6 +30,69 @@ python thinker/train.py --drc true \
                 --has_model false \
                 --discounting 0.97 \
                 --use_wandb true
+
+#python thinker/train.py --drc true \
+#                --xpid drc_drcsteps1_v4 \
+#                --tran_t 1 \
+#                --drs_steps 1 \
+#                --use_repetition false \
+#                --extend_baseline false \
+#                --actor_unroll_len 20 \
+#                --reg_cost 0.01 \
+#                --actor_learning_rate 4e-4 \
+#                --entropy_cost 1e-2 \
+#                --v_trace_lamb 0.97 \
+#                --actor_adam_eps 1e-4 \
+#                --has_model false \
+#                --discounting 0.97 \
+#                --use_wandb true
+
+#python thinker/train.py --drc true \
+#                --xpid drc_drcsteps2_repeat_rep_v1 \
+#                --tran_t 1 \
+#                --drs_steps 2 \
+#                --use_repetition true \
+#                --extend_baseline true \
+#                --actor_unroll_len 20 \
+#                --reg_cost 0.01 \
+#                --actor_learning_rate 4e-4 \
+#                --entropy_cost 1e-2 \
+#                --v_trace_lamb 0.97 \
+#                --actor_adam_eps 1e-4 \
+#                --has_model false \
+#                --discounting 0.97 \
+#                --use_wandb true
+
+
+#python thinker/train.py --drc true \
+#                --xpid drc_drcsteps2_repeat_v2 \
+#                --tran_t 1 \
+#                --drs_steps 2 \
+#                --extend_baseline false \
+#                --actor_unroll_len 20 \
+#                --reg_cost 0.01 \
+#                --actor_learning_rate 4e-4 \
+#                --entropy_cost 1e-2 \
+#                --v_trace_lamb 0.97 \
+#                --actor_adam_eps 1e-4 \
+#                --has_model false \
+#                --discounting 0.97 \
+#                --use_wandb true
+
+#python thinker/train.py --drc true \
+#                --xpid drc_drcsteps2_repeat_ext_v2 \
+#                --tran_t 1 \
+#                --drs_steps 2 \
+#                --extend_baseline true \
+#                --actor_unroll_len 20 \
+#                --reg_cost 0.01 \
+#                --actor_learning_rate 4e-4 \
+#                --entropy_cost 1e-2 \
+#                --v_trace_lamb 0.97 \
+#                --actor_adam_eps 1e-4 \
+#                --has_model false \
+#                --discounting 0.97 \
+#                --use_wandb true
 
 
 #python thinker/train.py --drc true \
