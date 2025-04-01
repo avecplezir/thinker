@@ -1024,15 +1024,21 @@ class DRCNet(ActorBaseNet):
         core_input = x_enc.view(*((T, B) + x_enc.shape[1:]))
         core_output, core_state = self.core(core_input, done, core_state, record_state=self.record_state)
         if self.record_state: self.hidden_state = self.core.hidden_state
-        print('core_output', core_output.shape)
-        core_output = torch.flatten(core_output, 0, 1)
-        print('core_output 2', core_output.shape)
+        # print('core_output', core_output.shape)
+        # core_output = torch.flatten(core_output, 0, 1)
+        # print('core_output 2', core_output.shape)
 
-        core_output = core_output[self.flags.tran_t - 1::self.flags.tran_t]
+        # core_output = core_output[self.flags.tran_t - 1::self.flags.tran_t]
+        # print('core_output 3', core_output.shape)
+        x_enc = torch.stack([core_input] * self.flags.tran_t, dim=0).view(T * self.flags.tran_t, B, *x_enc.shape[1:])
 
-        core_output = torch.cat([x_enc, core_output], dim=1)
-        core_output = torch.flatten(core_output, 1)
+        core_output = torch.cat([x_enc, core_output], dim=2)
+        core_output = torch.flatten(core_output, 2)
         final_out = F.relu(self.final_layer(core_output))
+
+        baseline = self.baseline(final_out)#.view(T * self.flags.tran_t, B, 1)
+        baseline = baseline[self.flags.tran_t - 1::self.flags.tran_t]
+        final_out = final_out[self.flags.tran_t-1::self.flags.tran_t]
 
         pri_logits = self.policy(final_out)
         pri_logits = pri_logits.view(T*B, self.dim_actions, self.num_actions)
@@ -1065,8 +1071,6 @@ class DRCNet(ActorBaseNet):
         action = pri_env  
         action_prob = F.softmax(pri_logits, dim=-1)
         if not self.tuple_action: action_prob = action_prob[:, :, 0]    
-
-        baseline = self.baseline(final_out).view(T, B, 1)
 
         if compute_loss:
             reg_loss = (

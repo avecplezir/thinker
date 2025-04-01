@@ -21,7 +21,7 @@ MAX_JOBS=4 pip install flash-attn==2.7.0.post2 --no-cache-dir --no-build-isolati
 
 salloc -c 4 --gres=gpu:a100:1 --mem=15G --time=2:00:00 --partition=long
 
-salloc -c 16 --gres=gpu:a100:1 --mem=40G --time=4:00:00 --partition=main
+salloc -c 4 --gres=gpu:1 --mem=15G --time=4:00:00 --partition=main
 
 
 jupyter notebook --no-browser --ip=* --port=8081
