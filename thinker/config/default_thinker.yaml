@@ -35,6 +35,7 @@ dual_net: true # whether to use dual network
 vp_loss: true # whether to use value and policy distillation loss
 im_separate_head: false # whether to use separate head for imagination policy and critic
 imagination_loss: false
+vp_net_target_frequency: -1
 im_entropy_cost: 0.0003 # 3e-4 #0.01
 im_value_cost: 0.5
 im_gamma: 0.99

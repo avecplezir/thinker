@@ -24,7 +24,7 @@ VPNetOut = namedtuple(
     ],
 )
 DualNetOut = namedtuple(
-    "DualNetOut", ["rs", "dones", "vs", "v_enc_logits", "policy", "xs", "hs", "zs", "state", "im_policy", "im_vs",]
+    "DualNetOut", ["rs", "dones", "vs", "v_enc_logits", "policy", "xs", "hs", "zs", "state", "im_policy", "im_vs", 'im_vs_target',]
 )
 
 class BaseNet(nn.Module):
@@ -1106,12 +1106,22 @@ class ModelNet(BaseNet):
             self.register_buffer("norm_high", high)        
 
         self.vp_net = VPNet(self.obs_shape, action_space, self.reward_n, flags)
+        if flags.vp_net_target_frequency > 0:
+            self.vp_net_target = VPNet(self.obs_shape, action_space, self.reward_n, flags)
+            self.vp_net_target.load_state_dict(self.vp_net.state_dict())
+            for p in self.vp_net_target.parameters():
+                p.requires_grad = False
+            self.vp_net_target.eval()
+
         self.hidden_shape = list(self.vp_net.hidden_shape)
         if self.dual_net:
             self.sr_net = SRNet(self.obs_shape, action_space, self.reward_n, flags, frame_stack_n)
             self.hidden_shape[0] += self.sr_net.hidden_shape[0]
         self.frame_ch = self.obs_shape[0] // frame_stack_n
         self.decoder_depth = flags.model_decoder_depth
+
+    def update_target(self):
+        self.vp_net_target.load_state_dict(self.vp_net.state_dict())
 
     def initial_state(self, batch_size=1, device=None):
         state = {}
@@ -1137,7 +1147,7 @@ class ModelNet(BaseNet):
             if self.state_dtype_n == 0: x = x.to(torch.uint8)
         return x
 
-    def forward(self, env_state, done, actions, state, future_env_state=None, training=False,):
+    def forward(self, env_state, done, actions, state, future_env_state=None, training=False, im_env_forward=False):
         """
         Args:
             env_state(tensor): starting frame (uint if normalize else float) with shape (B, C, H, W)
@@ -1188,7 +1198,13 @@ class ModelNet(BaseNet):
             new_state["acc_done"] = acc_done            
             new_state["sr_last_xs"] = full_xs[-1]
 
-        return self._prepare_out(sr_net_out, vp_net_out, new_state, full_xs)
+        if self.vp_net_target_frequency > 0 and im_env_forward:
+            with torch.no_grad():
+                vp_net_target_out = self.vp_net_target(env_state_norm, x0, xs, done, actions, state)
+        else:
+            vp_net_target_out = None
+
+        return self._prepare_out(sr_net_out, vp_net_out, new_state, full_xs, vp_net_target_out=vp_net_target_out)
 
     def forward_single(self, state, action, future_x=None, training=False, detach_features=False, im_env_forward=False):
         """
@@ -1216,6 +1232,14 @@ class ModelNet(BaseNet):
         )
         state_.update(vp_net_out.state)
 
+        if self.vp_net_target_frequency > 0 and im_env_forward:
+            with torch.no_grad():
+                vp_net_target_out = self.vp_net_target.forward_single(
+                    action=action, state=state, x=x, detach_features=detach_features,
+                )
+        else:
+            vp_net_target_out = None
+
         if not training and self.dual_net:
             acc_done = state["acc_done"]
             if torch.any(acc_done): 
@@ -1227,9 +1251,9 @@ class ModelNet(BaseNet):
             state_["acc_done"] = acc_done
             state_["sr_last_xs"] = xs[-1]
 
-        return self._prepare_out(sr_net_out, vp_net_out, state_, xs)
+        return self._prepare_out(sr_net_out, vp_net_out, state_, xs, vp_net_target_out=vp_net_target_out)
 
-    def _prepare_out(self, sr_net_out, vp_net_out,  state, xs):
+    def _prepare_out(self, sr_net_out, vp_net_out,  state, xs, vp_net_target_out=None):
         rd_out = sr_net_out if self.dual_net else vp_net_out
         if self.dual_net:
             hs = torch.concat([sr_net_out.hs, vp_net_out.hs], dim=2)
@@ -1257,6 +1281,7 @@ class ModelNet(BaseNet):
             state=state,
             im_policy=vp_net_out.im_policy,
             im_vs=vp_net_out.im_vs,
+            im_vs_target=vp_net_target_out.vs if vp_net_target_out is not None else None,
         )
     
     def compute_vs_loss(self, vs, v_enc_logits, target_vs):

@@ -395,6 +395,10 @@ class SModelLearner:
         Computes Dreamer-style losses using policy gradient for values and policy.
         """
         # Reset the imagination environment
+
+        if self.flags.vp_net_target_frequency > 0 and self.step % self.flags.vp_net_target_frequency == 0:
+            self.model_net.update_target()
+
         total_loss = 0
         unroll_steps_im = 5
         discount = self.flags.im_gamma * torch.ones(train_model_out.real_state.shape[0], device=self.device).to(is_weights.device)
@@ -579,7 +583,6 @@ class SModelLearner:
                 target_enc = self.model_net.vp_net.encoder.forward_pre_mem(
                     target_xs, action, flatten=True, depth=self.flags.model_decoder_depth
                 )
-            print('target_enc', target_enc.shape)
             pred_enc = self.model_net.vp_net.encoder.forward_pre_mem(out.xs, action, flatten=True, depth=self.flags.model_decoder_depth)
             fea_loss = self.compute_state_loss(target_enc, pred_enc, target["done_mask"][1:], is_weights, self.flags.img_fea_cos)
         else:

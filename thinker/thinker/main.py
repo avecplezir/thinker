@@ -474,7 +474,8 @@ class EnvImagination(Env):
                                   env_state=obs,
                                   done=None,
                                   actions=pass_action.unsqueeze(0).to(self.device),
-                                  state=self.initial_per_state, )
+                                  state=self.initial_per_state,
+                                  im_env_forward=True)
         self.state = model_net_out.state
         return model_net_out
 
