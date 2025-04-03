@@ -579,6 +579,7 @@ class SModelLearner:
                 target_enc = self.model_net.vp_net.encoder.forward_pre_mem(
                     target_xs, action, flatten=True, depth=self.flags.model_decoder_depth
                 )
+            print('target_enc', target_enc.shape)
             pred_enc = self.model_net.vp_net.encoder.forward_pre_mem(out.xs, action, flatten=True, depth=self.flags.model_decoder_depth)
             fea_loss = self.compute_state_loss(target_enc, pred_enc, target["done_mask"][1:], is_weights, self.flags.img_fea_cos)
         else:
