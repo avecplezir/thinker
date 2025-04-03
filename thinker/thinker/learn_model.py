@@ -410,7 +410,7 @@ class SModelLearner:
         for sample_idx in range(num_of_iterations):
             model_net_out = self.im_env.reset(train_model_out.real_state[sample_idx], train_model_out.action[sample_idx])
 
-            log_probs, values, rewards, entropy, dones = [], [], [], [], []
+            log_probs, values, rewards, entropy, dones, target_values = [], [], [], [], [], []
 
             for i in range(unroll_steps_im):
                 im_policy_out = model_net_out.im_policy #self.model_net.im_policy(model_net_out)
@@ -419,6 +419,7 @@ class SModelLearner:
                 log_prob = probs.log_prob(action)
                 ent = probs.entropy()
                 value = model_net_out.im_vs
+                target_values = model_net_out.im_vs_target
                 model_net_out, reward, done, *_ = self.im_env.step(action.squeeze(0))
 
                 log_probs.append(log_prob.squeeze(-1))
@@ -426,6 +427,8 @@ class SModelLearner:
                 rewards.append(reward.squeeze(-1))
                 entropy.append(ent.squeeze(-1))
                 dones.append(done.squeeze(-1))
+                if self.flags.vp_net_target_frequency > 0:
+                    target_values.append(target_values.squeeze(-1))
 
             # Convert lists to tensors
             log_probs = torch.concat(log_probs, dim=0)
