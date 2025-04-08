@@ -32,6 +32,19 @@ fea_loss_inf_bn: true # whether to use inference mode for vp-net when computing 
 img_fea_cos: true # whether to use cosine similarity loss for img_loss and fea_loss
 # model setting
 dual_net: true # whether to use dual network
+vp_loss: true # whether to use value and policy distillation loss
+im_separate_head: false # whether to use separate head for imagination policy and critic
+imagination_loss: false
+vp_net_target_frequency: -1
+im_entropy_cost: 0.0003 # 3e-4 #0.01
+im_value_cost: 0.5
+im_gamma: 0.99
+im_lambda: 0.95
+im_loss_cost: 1
+detach_features: false # whether to detach the features when computing the im policy and value loss
+use_dones_im: true # whether to use dones in the imagination loss
+num_im_iterations: 1 # number of iterations for the imagination loss, take the minimum of this and the number of steps in the unroll
+
 model_decoder_depth: 0 # decoder level; can be from 0 to 4; 0 mean predicing raw image, 4 mean predicting vp_net feature directly
 model_enc_type: 0 # reward / value encoding type for the model; 0 for no encoding, 1 for scalar encoding, 2 for unbiased vector encoding, 3 for biased vector encoding
 model_enc_f_type: 0 # scalar encoding function for reward / value encoding; 0 for MuZero-like encoding, 1 for Dreamer-like encoding

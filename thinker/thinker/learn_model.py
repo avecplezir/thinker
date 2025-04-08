@@ -6,6 +6,7 @@ import traceback
 import ray
 import torch
 import torch.nn.functional as F
+from torch.distributions.categorical import Categorical
 from torch.cuda.amp import GradScaler, autocast
 from thinker.core.file_writer import FileWriter
 from thinker.core.module import guassian_kl_div
@@ -145,6 +146,9 @@ class SModelLearner:
         self.start_training = False
         self.finish = False
 
+        from thinker.main import EnvImagination
+        self.im_env = EnvImagination(model_net=self.model_net, flags=self.flags)
+
     def read_buffer_ptr(self):
         return self.model_buffer.read.remote(self.model_T, self.model_B, self.compute_beta(), add_t=self.flags.model_return_n+1)
 
@@ -283,17 +287,28 @@ class SModelLearner:
             losses_m = {}
             total_norm_m = torch.zeros(1, device=self.device)
             pred_xs = None
-        with autocast(enabled=self.flags.float16):
-            losses_p, priorities = self.compute_losses_p(
-                train_model_out, target, is_weights, pred_xs
+
+        if self.flags.vp_loss:
+            with autocast(enabled=self.flags.float16):
+                losses_p, priorities = self.compute_losses_p(
+                    train_model_out, target, is_weights, pred_xs
+                )
+            if self.timing is not None:
+                self.timing.time("compute_losses_p")
+            total_norm_p = self.gradient_step(
+                losses_p["total_loss_p"], self.optimizer_p, self.scheduler_p, self.scaler_p
             )
-        if self.timing is not None:
-            self.timing.time("compute_losses_p")
-        total_norm_p = self.gradient_step(
-            losses_p["total_loss_p"], self.optimizer_p, self.scheduler_p, self.scaler_p
-        )
-        if self.timing is not None:
-            self.timing.time("gradient_step_p")
+            if self.timing is not None:
+                self.timing.time("gradient_step_p")
+
+        if self.flags.imagination_loss:
+            with autocast(enabled=self.flags.float16):
+                losses_im = self.compute_losses_im(train_model_out, is_weights)
+            if self.timing is not None:
+                self.timing.time("compute_losses_im")
+            total_norm_p = self.gradient_step(
+                losses_im["total_loss_im"], self.optimizer_p, self.scheduler_p, self.scaler_p
+            )
         if self.flags.priority_alpha > 0:
             if model_buffer is None:
                 self.model_buffer.update_priority.remote(idx, priorities)
@@ -303,7 +318,10 @@ class SModelLearner:
         if self.timing is not None:
             self.timing.time("update_priority")
         losses = losses_m
-        losses.update(losses_p)
+        if self.flags.vp_loss:
+            losses.update(losses_p)
+        if self.flags.imagination_loss:
+            losses.update(losses_im)
         # print statistics
         if self.timer() - self.start_time > 5:
             self.sps_buffer[self.sps_buffer_n] = (self.step, self.timer())
@@ -371,6 +389,99 @@ class SModelLearner:
             self.ckp_start_time = int(time.strftime("%M")) // 10
         if self.timing is not None:
             self.timing.time("misc")
+
+    def compute_losses_im(self, train_model_out, is_weights):
+        """
+        Computes Dreamer-style losses using policy gradient for values and policy.
+        """
+        # Reset the imagination environment
+
+        if self.flags.vp_net_target_frequency > 0 and self.step % self.flags.vp_net_target_frequency == 0:
+            self.model_net.update_target()
+
+        total_loss = 0
+        unroll_steps_im = 5
+        discount = self.flags.im_gamma * torch.ones(train_model_out.real_state.shape[0], device=self.device).to(is_weights.device)
+        # im_weights = torch.cumprod(torch.cat([torch.ones_like(discount[:1]), discount[:unroll_steps_im-1]], 0), 0).detach().unsqueeze(-1)
+        im_weights = torch.cat([torch.ones_like(discount[:1]), torch.zeros_like(discount[:unroll_steps_im - 1])], 0).detach().unsqueeze(-1)
+
+        # for sample_idx in range(train_model_out.real_state.shape[0]):
+        num_of_iterations = min(self.flags.num_im_iterations, train_model_out.real_state.shape[0])
+        for sample_idx in range(num_of_iterations):
+            model_net_out = self.im_env.reset(train_model_out.real_state[sample_idx], train_model_out.action[sample_idx])
+
+            log_probs, values, rewards, entropy, dones, target_values = [], [], [], [], [], []
+
+            for i in range(unroll_steps_im):
+                im_policy_out = model_net_out.im_policy #self.model_net.im_policy(model_net_out)
+                probs = Categorical(logits=im_policy_out)
+                action = probs.sample()
+                log_prob = probs.log_prob(action)
+                ent = probs.entropy()
+                value = model_net_out.im_vs
+                target_values = model_net_out.im_vs_target
+                model_net_out, reward, done, *_ = self.im_env.step(action.squeeze(0))
+
+                log_probs.append(log_prob.squeeze(-1))
+                values.append(value.squeeze(-1))
+                rewards.append(reward.squeeze(-1))
+                entropy.append(ent.squeeze(-1))
+                dones.append(done.squeeze(-1))
+                if self.flags.vp_net_target_frequency > 0:
+                    target_values.append(target_values.squeeze(-1))
+
+            # Convert lists to tensors
+            log_probs = torch.concat(log_probs, dim=0)
+            values = torch.concat(values, dim=0)
+            rewards = torch.concat(rewards, dim=0).detach()
+            entropy = torch.concat(entropy, dim=0)
+            dones = torch.concat(dones, dim=0)
+
+            # Compute returns using λ-return (generalized advantage estimation - GAE)
+            gamma, lambda_ = self.flags.im_gamma, self.flags.im_lambda #0.99, 0.95
+            advantages = torch.zeros_like(rewards)
+            gae = 0
+            next_value = model_net_out.im_vs.detach().flatten(0)
+
+            if self.flags.use_dones_im:
+                not_dones = torch.logical_not(dones)
+            else:
+                not_dones = torch.ones_like(dones)
+
+            for t in reversed(range(len(rewards))):
+                delta = rewards[t] + gamma * next_value - values[t]
+                gae = delta + gamma * lambda_ * gae * not_dones[t]
+                advantages[t] = gae
+                next_value = values[t]
+            returns = advantages + values
+
+            not_dones_mask = torch.cumprod(not_dones, 0)
+            # Policy loss: maximize expected return using policy gradient
+            # policy_loss = im_weights * is_weights.unsqueeze(0) * log_probs * advantages.detach()
+            # print('policy_loss', policy_loss.shape)
+            policy_loss = -(not_dones_mask * im_weights * is_weights.unsqueeze(0) * log_probs * advantages.detach()).sum()
+
+            # Value loss: MSE between predicted values and target returns
+            value_loss = (not_dones_mask * im_weights * is_weights.unsqueeze(0) * (values - returns.detach())**2).sum() #F.mse_loss(values, returns.detach())
+
+            # Entropy loss for exploration bonus
+            entropy_loss = -torch.sum(not_dones_mask * im_weights * is_weights.unsqueeze(0) * entropy)
+
+            # Total loss (weighted sum of policy, value, and entropy losses)
+            loss = policy_loss + self.flags.im_value_cost * value_loss + self.flags.im_entropy_cost * entropy_loss
+
+            total_loss += loss
+
+        # total_loss = total_loss / len(rewards)
+        total_loss = self.flags.im_loss_cost * total_loss / num_of_iterations
+
+        return {
+            "total_loss_im": total_loss,
+            "policy_loss_im": policy_loss,
+            "value_loss_im": value_loss,
+            "values_im": values.sum(),
+            "entropy_loss_im": entropy_loss,
+        }
 
     def compute_rs_loss(self, target, rs, r_enc_logits, rv_tran, is_weights):
         k, b = self.flags.model_unroll_len, target["rewards"].shape[1]
@@ -471,7 +582,7 @@ class SModelLearner:
         else:
             img_loss = None
         if self.flags.model_fea_loss_cost > 0.:
-            with torch.no_grad():                
+            with torch.no_grad():
                 target_enc = self.model_net.vp_net.encoder.forward_pre_mem(
                     target_xs, action, flatten=True, depth=self.flags.model_decoder_depth
                 )

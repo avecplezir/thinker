@@ -10,7 +10,7 @@ import math
 OutNetOut = namedtuple(
     "OutNetOut",
     [
-        "rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits", "policy"
+        "rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits", "policy", "im_policy", "im_vs",
     ],
 )
 SRNetOut = namedtuple(
@@ -20,11 +20,11 @@ SRNetOut = namedtuple(
 VPNetOut = namedtuple(
     "VPNetOut",
     ["rs", "r_enc_logits", "dones", "done_logits", "vs", "v_enc_logits",
-        "policy", "hs", "pred_zs", "true_zs", "state",
+        "policy", "hs", "pred_zs", "true_zs", "state", "im_policy", "im_vs",
     ],
 )
 DualNetOut = namedtuple(
-    "DualNetOut", ["rs", "dones", "vs", "v_enc_logits", "policy", "xs", "hs", "zs", "state"]
+    "DualNetOut", ["rs", "dones", "vs", "v_enc_logits", "policy", "xs", "hs", "zs", "state", "im_policy", "im_vs", 'im_vs_target',]
 )
 
 class BaseNet(nn.Module):
@@ -365,7 +365,8 @@ class DynamicModel(nn.Module):
         x = h
         if self.training and not self.disable_half_grad:
             # no half-gradient for dreamer net
-            x.register_hook(lambda grad: grad * 0.5)
+            # x.register_hook(lambda grad: grad * 0.5)
+            pass
         if not self.oned_input:
             actions = (
                 actions.unsqueeze(-1).unsqueeze(-1).tile([1, 1, x.shape[2], x.shape[3]])
@@ -428,6 +429,7 @@ class OutputNet(nn.Module):
         predict_r=True,
         predict_done=False,
         ordinal=False,
+        im_separate_head=False,
     ):
         super(OutputNet, self).__init__()
 
@@ -442,7 +444,8 @@ class OutputNet(nn.Module):
         self.predict_v_pi = predict_v_pi
         self.predict_r = predict_r
         self.predict_done = predict_done  
-        self.ordinal = ordinal      
+        self.ordinal = ordinal
+        self.im_separate_head = im_separate_head
 
         assert self.enc_type in [0, 2, 3], "model encoding type can only be 0, 2, 3"
 
@@ -474,6 +477,15 @@ class OutputNet(nn.Module):
                 nn.init.constant_(self.fc_v.bias, 0.0)
                 nn.init.constant_(self.fc_logits.weight, 0.0)
                 nn.init.constant_(self.fc_logits.bias, 0.0)
+
+            if self.im_separate_head:
+                self.fc_logits_im = nn.Linear(fc_in, self.dim_actions*(self.num_actions if self.discrete_action else 2))
+                self.fc_v_im = nn.Linear(fc_in, out_n)
+                if zero_init:
+                    nn.init.constant_(self.fc_v_im.weight, 0.0)
+                    nn.init.constant_(self.fc_v_im.bias, 0.0)
+                    nn.init.constant_(self.fc_logits_im.weight, 0.0)
+                    nn.init.constant_(self.fc_logits_im.bias, 0.0)
 
         if predict_done:
             self.fc_done = nn.Linear(fc_in, 1)
@@ -536,6 +548,13 @@ class OutputNet(nn.Module):
                 r = r_out
         else:
             r, r_enc_logit = None, None
+
+        if self.predict_v_pi and self.im_separate_head:
+            im_policy = self._compute_policy(self.fc_logits_im, x_policy)
+            im_v = self.fc_v_im(x_v)
+        else:
+            im_policy, im_v = policy, v
+
         out = OutNetOut(
             rs=r,
             r_enc_logits=r_enc_logit,
@@ -544,6 +563,8 @@ class OutputNet(nn.Module):
             vs=v,
             v_enc_logits=v_enc_logit,
             policy=policy,
+            im_policy=im_policy,
+            im_vs=im_v,
         )
         return out
     
@@ -876,6 +897,7 @@ class VPNet(nn.Module):
             predict_r=self.predict_rd,
             predict_done=self.predict_rd and self.flags.model_done_loss_cost > 0.0,
             ordinal=self.flags.model_ordinal,
+            im_separate_head=self.flags.im_separate_head,
         )
 
         if not self.dual_net:
@@ -996,9 +1018,11 @@ class VPNet(nn.Module):
             true_zs=zs,
             pred_zs=pred_zs,
             state=new_state,
+            im_policy=util.safe_concat(outs, "im_policy", 0),
+            im_vs=util.safe_concat(outs, "im_vs", 0),
         )
 
-    def forward_single(self, action, state, x=None, one_hot=False):
+    def forward_single(self, action, state, x=None, one_hot=False, detach_features=False):
         """
         Single unroll of the network with one action
         Args:
@@ -1015,6 +1039,8 @@ class VPNet(nn.Module):
         else:
             rnn_in = state["vp_h"]
         h = self.RNN(h=rnn_in, actions=action)
+        if detach_features:
+            h = h.detach()
         out = self.out(h, predict_reward=True)
         new_state["vp_h"] = h
 
@@ -1034,6 +1060,8 @@ class VPNet(nn.Module):
             true_zs=None,
             pred_zs=util.safe_unsqueeze(pred_z, 0),
             state=new_state,
+            im_policy=util.safe_unsqueeze(out.im_policy, 0),
+            im_vs=util.safe_unsqueeze(out.im_vs, 0),
         )
     
     def compute_z0(self, env_state_norm, done, action, state):
@@ -1078,12 +1106,22 @@ class ModelNet(BaseNet):
             self.register_buffer("norm_high", high)        
 
         self.vp_net = VPNet(self.obs_shape, action_space, self.reward_n, flags)
+        if flags.vp_net_target_frequency > 0:
+            self.vp_net_target = VPNet(self.obs_shape, action_space, self.reward_n, flags)
+            self.vp_net_target.load_state_dict(self.vp_net.state_dict())
+            for p in self.vp_net_target.parameters():
+                p.requires_grad = False
+            self.vp_net_target.eval()
+
         self.hidden_shape = list(self.vp_net.hidden_shape)
         if self.dual_net:
             self.sr_net = SRNet(self.obs_shape, action_space, self.reward_n, flags, frame_stack_n)
             self.hidden_shape[0] += self.sr_net.hidden_shape[0]
         self.frame_ch = self.obs_shape[0] // frame_stack_n
         self.decoder_depth = flags.model_decoder_depth
+
+    def update_target(self):
+        self.vp_net_target.load_state_dict(self.vp_net.state_dict())
 
     def initial_state(self, batch_size=1, device=None):
         state = {}
@@ -1109,7 +1147,7 @@ class ModelNet(BaseNet):
             if self.state_dtype_n == 0: x = x.to(torch.uint8)
         return x
 
-    def forward(self, env_state, done, actions, state, future_env_state=None, training=False):
+    def forward(self, env_state, done, actions, state, future_env_state=None, training=False, im_env_forward=False):
         """
         Args:
             env_state(tensor): starting frame (uint if normalize else float) with shape (B, C, H, W)
@@ -1160,9 +1198,15 @@ class ModelNet(BaseNet):
             new_state["acc_done"] = acc_done            
             new_state["sr_last_xs"] = full_xs[-1]
 
-        return self._prepare_out(sr_net_out, vp_net_out, new_state, full_xs)
+        if self.vp_net_target_frequency > 0 and im_env_forward:
+            with torch.no_grad():
+                vp_net_target_out = self.vp_net_target(env_state_norm, x0, xs, done, actions, state)
+        else:
+            vp_net_target_out = None
 
-    def forward_single(self, state, action, future_x=None, training=False):
+        return self._prepare_out(sr_net_out, vp_net_out, new_state, full_xs, vp_net_target_out=vp_net_target_out)
+
+    def forward_single(self, state, action, future_x=None, training=False, detach_features=False, im_env_forward=False):
         """
         One-step transition from z_t, h_t, a_t to predicted z_{t+1}, h_{t+1}, r_{t+1}, v_{t+1}, pi_{t+1}
         Args:
@@ -1179,10 +1223,22 @@ class ModelNet(BaseNet):
             state_.update(sr_net_out.state)
         else:
             x = None
+
+        if im_env_forward:
+            x = x.detach()
+
         vp_net_out = self.vp_net.forward_single(
-            action=action, state=state, x=x,
+            action=action, state=state, x=x, detach_features=detach_features,
         )
         state_.update(vp_net_out.state)
+
+        if self.vp_net_target_frequency > 0 and im_env_forward:
+            with torch.no_grad():
+                vp_net_target_out = self.vp_net_target.forward_single(
+                    action=action, state=state, x=x, detach_features=detach_features,
+                )
+        else:
+            vp_net_target_out = None
 
         if not training and self.dual_net:
             acc_done = state["acc_done"]
@@ -1195,9 +1251,9 @@ class ModelNet(BaseNet):
             state_["acc_done"] = acc_done
             state_["sr_last_xs"] = xs[-1]
 
-        return self._prepare_out(sr_net_out, vp_net_out, state_, xs)
+        return self._prepare_out(sr_net_out, vp_net_out, state_, xs, vp_net_target_out=vp_net_target_out)
 
-    def _prepare_out(self, sr_net_out, vp_net_out,  state, xs):
+    def _prepare_out(self, sr_net_out, vp_net_out,  state, xs, vp_net_target_out=None):
         rd_out = sr_net_out if self.dual_net else vp_net_out
         if self.dual_net:
             hs = torch.concat([sr_net_out.hs, vp_net_out.hs], dim=2)
@@ -1223,6 +1279,9 @@ class ModelNet(BaseNet):
             hs=hs,
             zs=vp_net_out.pred_zs,
             state=state,
+            im_policy=vp_net_out.im_policy,
+            im_vs=vp_net_out.im_vs,
+            im_vs_target=vp_net_target_out.vs if vp_net_target_out is not None else None,
         )
     
     def compute_vs_loss(self, vs, v_enc_logits, target_vs):
